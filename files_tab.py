@@ -48,42 +48,42 @@ if not _log.handlers:
 # ---------- стили (живут здесь, THEME_QSS не трогаем) ----------
 SEG_QSS = """
 QPushButton#segLeft, QPushButton#segRight {
-    background: #232C47; color: #C9D4E8; border: 1px solid #2A3550;
+    background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
 QPushButton#segLeft { border-top-left-radius: 10px; border-bottom-left-radius: 10px; border-right: none; }
 QPushButton#segRight { border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
-QPushButton#segLeft:hover, QPushButton#segRight:hover { background: #2B3658; }
+QPushButton#segLeft:hover, QPushButton#segRight:hover { background: #3D3D3D; }
 QPushButton#segLeft:checked, QPushButton#segRight:checked {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6C5CE7, stop:1 #00B8D4);
+    background: #484848;
     color: #FFFFFF;
 }
 """
 
 FILES_QSS = """
-QFrame#banner { background: rgba(217, 119, 6, 26); border: 1px solid #7C4A12; border-radius: 10px; }
-QFrame#bannerErr { background: rgba(220, 38, 38, 30); border: 1px solid #7F2D2D; border-radius: 10px; }
-QLabel#bannerText { color: #FCD34D; font-weight: 600; }
-QFrame#bannerErr QLabel#bannerText { color: #FCA5A5; }
-QLabel#statusLine { color: #8B93A7; font-size: 11px; }
+QFrame#banner { background: #2B2B2B; border: 1px solid #4A4A4A; border-radius: 10px; }
+QFrame#bannerErr { background: #2B2B2B; border: 1px solid #6A6A6A; border-radius: 10px; }
+QLabel#bannerText { color: #E0E0E0; font-weight: 600; }
+QFrame#bannerErr QLabel#bannerText { color: #FFFFFF; }
+QLabel#statusLine { color: #9D9D9D; font-size: 11px; }
 QLabel#paneTitle { font-size: 13px; font-weight: 700; color: #FFFFFF; }
 QTableWidget#fileTable {
-    background: #151C2E; alternate-background-color: #182036;
-    color: #E8ECF4; gridline-color: #232D47; border: 1px solid #2A3550; border-radius: 10px;
+    background: #262626; alternate-background-color: #292929;
+    color: #FFFFFF; gridline-color: #262626; border: 1px solid #3A3A3A; border-radius: 10px;
 }
 QTableWidget#fileTable::item { padding: 4px 6px; border: none; }
-QTableWidget#fileTable::item:selected { background: rgba(108, 92, 231, 55); color: #FFFFFF; }
+QTableWidget#fileTable::item:selected { background: #383838; color: #FFFFFF; }
 QTableWidget#queueTable {
-    background: #151C2E; color: #E8ECF4; gridline-color: #232D47;
-    border: 1px solid #2A3550; border-radius: 10px;
+    background: #262626; color: #FFFFFF; gridline-color: #262626;
+    border: 1px solid #3A3A3A; border-radius: 10px;
 }
 QTableWidget#queueTable::item { padding: 3px 6px; border: none; }
 QProgressBar {
-    background: #0F1420; border: 1px solid #2A3550; border-radius: 6px;
-    text-align: center; color: #C9D4E8; font-size: 10px; height: 14px;
+    background: #202020; border: 1px solid #3A3A3A; border-radius: 6px;
+    text-align: center; color: #D0D0D0; font-size: 10px; height: 14px;
 }
 QProgressBar::chunk {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6C5CE7, stop:1 #00B8D4);
+    background: #6A6A6A;
     border-radius: 5px;
 }
 """
@@ -770,6 +770,9 @@ class FilePane(QFrame):
         self.sort_col = 0
         self.sort_desc = False
         self.show_hidden = False
+        st = self.style()
+        self._icon_dir = st.standardIcon(QStyle.SP_DirIcon)
+        self._icon_file = st.standardIcon(QStyle.SP_FileIcon)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 14)
@@ -805,7 +808,7 @@ class FilePane(QFrame):
         self.btn_mkdir.setCursor(Qt.PointingHandCursor)
         self.btn_mkdir.clicked.connect(self.do_mkdir)
         self.btn_send = QPushButton("Загрузить ↑" if side == "local" else "↓ Скачать")
-        self.btn_send.setObjectName("btnPrimary")
+        self.btn_send.setObjectName("btnGhost")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.send_selected)
         bar.addWidget(self.edit_path, 1)
@@ -943,7 +946,8 @@ class FilePane(QFrame):
         self.table.setRowCount(len(rows) + (1 if dotdot else 0))
         start = 0
         if dotdot:
-            it = QTableWidgetItem("📁 ..")
+            it = QTableWidgetItem("..")
+            it.setIcon(self._icon_dir)
             it.setData(Qt.UserRole, {"dotdot": True, "entry": None})
             self.table.setItem(0, 0, it)
             for j in range(1, self.table.columnCount()):
@@ -951,14 +955,15 @@ class FilePane(QFrame):
             start = 1
         for k, e in enumerate(rows):
             i = k + start
-            icon = "📁" if e.is_dir else ("🔗" if e.is_link else "📄")
-            name = f"{icon} {e.name}" + (" →" if e.is_link else "")
+            name = e.name + (" →" if e.is_link else "")
             vals = [name,
                     "" if e.is_dir else human_size(e.size),
                     fmt_time(e.mtime)] + ([e.mode if not e.is_dir or e.mode else ""] if show_mode else [])
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, {"dotdot": False, "entry": e})
+                if j == 0:
+                    it.setIcon(self._icon_dir if e.is_dir else self._icon_file)
                 self.table.setItem(i, j, it)
         arrows = {0: " ▲" if not self.sort_desc else " ▼"}.get(self.sort_col, "")
         base = self.COLS_REMOTE if show_mode else self.COLS_LOCAL
@@ -1038,7 +1043,7 @@ class FilePane(QFrame):
         dotdot = self._selection_has_dotdot()
         m = QMenu(self)
         if self.side == "local":
-            a_open = m.addAction("📂 Открыть")
+            a_open = m.addAction("Открыть")
             a_open.setEnabled(len(sel) == 1 and not dotdot)
             a_open.triggered.connect(self.do_open_local)
             m.addSeparator()
@@ -1229,7 +1234,7 @@ class QueueWidget(QFrame):
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
         top = QHBoxLayout()
-        t = QLabel("📥 Очередь передач")
+        t = QLabel("Очередь передач")
         t.setObjectName("paneTitle")
         top.addWidget(t)
         top.addStretch()
@@ -1364,11 +1369,11 @@ class FilesTab(QWidget):
         lay.addWidget(self.banner)
 
         # панели
-        self.pane_local = FilePane("local", "💻 Мой компьютер", show_mode=False)
+        self.pane_local = FilePane("local", "Мой компьютер", show_mode=False)
         self.pane_local.set_backend(self._local)
         self.pane_local.chk_hidden.setChecked(bool(self._state.get("hidden", False)))
         self.pane_local.show_hidden = bool(self._state.get("hidden", False))
-        self.pane_remote = FilePane("remote", "🖥 Сервер", show_mode=True)
+        self.pane_remote = FilePane("remote", "Сервер", show_mode=True)
         self.pane_remote.chk_hidden.setChecked(bool(self._state.get("hidden", False)))
         self.pane_remote.show_hidden = bool(self._state.get("hidden", False))
         self.pane_remote.show_notice("Подключитесь к серверу карточкой выше")

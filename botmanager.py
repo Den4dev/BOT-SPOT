@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bot Manager: FileZilla для systemd-ботов. Подключился по SSH, видишь ботов, жмёшь кнопки."""
+"""BOT SPOT: FileZilla для systemd-ботов. Подключился по SSH, видишь ботов, жмёшь кнопки."""
 import json
 import re
 import shlex
@@ -8,8 +8,9 @@ import threading
 from pathlib import Path, PurePosixPath
 
 import paramiko
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
@@ -53,79 +54,109 @@ def app_icon():
     return QIcon()
 
 
+_ICON_CACHE: dict[tuple[str, str, int], QIcon] = {}
+
+
+def load_icon(name: str, color: str = "#E0E0E0", size: int = 16) -> QIcon:
+    """Монохромная SVG-иконка из icons/ с подстановкой currentColor. Только отображение."""
+    key = (name, color, size)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    icon = QIcon()
+    try:
+        data = Path(resource_path(f"icons/{name}.svg")).read_text(encoding="utf-8")
+        data = data.replace("currentColor", color)
+        rend = QSvgRenderer(QByteArray(data.encode("utf-8")))
+        if rend.isValid():
+            pm = QPixmap(size, size)
+            pm.fill(Qt.transparent)
+            with QPainter(pm) as p:
+                rend.render(p)
+            icon = QIcon(pm)
+    except OSError:
+        pass
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+def strip_docker_prefix(name: str) -> str:
+    """Имя для отображения: без служебного префикса '🐳 '. Данные и логика не меняются."""
+    return name[2:].strip() if name.startswith("🐳 ") else name
+
+
 THEME_QSS = """
 * { outline: none; }
-QMainWindow, QWidget#root { background: #0F1420; }
-QLabel { color: #E8ECF4; }
+QMainWindow, QWidget#root { background: #202020; }
+QLabel { color: #FFFFFF; }
 QLabel#title { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: #FFFFFF; }
-QLabel#subtitle { color: #8B93A7; font-size: 11px; }
+QLabel#subtitle { color: #9D9D9D; font-size: 11px; }
 QLabel#h2 { font-size: 13px; font-weight: 700; color: #FFFFFF; }
 QLabel#statsPill {
-    background: rgba(108, 92, 231, 38); color: #C7CBFF;
-    border: 1px solid #343B63; border-radius: 10px; padding: 6px 12px; font-weight: 600;
+    background: #2B2B2B; color: #E0E0E0;
+    border: 1px solid #3A3A3A; border-radius: 10px; padding: 6px 12px; font-weight: 600;
 }
 QFrame#card {
-    background: #1A2233; border: 1px solid #2A3550; border-radius: 14px;
+    background: #2B2B2B; border: 1px solid #3A3A3A; border-radius: 10px;
 }
 QLineEdit, QComboBox, QSpinBox {
-    background: #0F1420; color: #E8ECF4; border: 1px solid #2A3550;
-    border-radius: 9px; padding: 7px 11px; selection-background-color: #6C5CE7;
+    background: #202020; color: #FFFFFF; border: 1px solid #3A3A3A;
+    border-radius: 8px; padding: 7px 11px; selection-background-color: #5A5A5A;
 }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #6C5CE7; }
-QLineEdit::placeholder { color: #5B657D; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #9D9D9D; }
+QLineEdit::placeholder { color: #9D9D9D; }
 QComboBox QAbstractItemView {
-    background: #1A2233; color: #E8ECF4; border: 1px solid #2A3550;
-    selection-background-color: #6C5CE7; outline: none;
+    background: #2B2B2B; color: #FFFFFF; border: 1px solid #3A3A3A;
+    selection-background-color: #5A5A5A; outline: none;
 }
 QPushButton {
-    border: none; border-radius: 9px; padding: 9px 18px;
-    font-weight: 700; color: #FFFFFF; background: #2A3550;
+    border: 1px solid transparent; border-radius: 8px; padding: 9px 18px;
+    font-weight: 700; color: #FFFFFF; background: #3D3D3D;
 }
-QPushButton:hover { filter: brightness(115%); background: #33405F; }
-QPushButton:pressed { background: #232C47; }
-QPushButton:disabled { color: #7C86A0; background: #222A41; }
-QPushButton#btnPrimary { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6C5CE7, stop:1 #00B8D4); }
-QPushButton#btnPrimary:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7D6EF0, stop:1 #1AC6DE); }
-QPushButton#btnSuccess { background: #16A34A; }
-QPushButton#btnSuccess:hover { background: #22C55E; }
-QPushButton#btnDanger { background: #DC2626; }
-QPushButton#btnDanger:hover { background: #EF4444; }
-QPushButton#btnWarning { background: #D97706; }
-QPushButton#btnWarning:hover { background: #F59E0B; }
-QPushButton#btnGhost { background: #232C47; color: #C9D4E8; border: 1px solid #2A3550; }
-QPushButton#btnGhost:hover { background: #2B3658; }
-QCheckBox { color: #C9D4E8; spacing: 7px; }
-QCheckBox::indicator { width: 16px; height: 16px; border-radius: 5px; border: 1px solid #3A4666; background: #0F1420; }
-QCheckBox::indicator:checked { background: #6C5CE7; border: 1px solid #6C5CE7; }
+QPushButton:hover { background: #484848; }
+QPushButton:pressed { background: #333333; }
+QPushButton:disabled { color: #6A6A6A; background: #2B2B2B; }
+QPushButton#btnPrimary { background: #3D3D3D; border: 1px solid #565656; }
+QPushButton#btnPrimary:hover { background: #484848; }
+QPushButton#btnSuccess { background: #1F9D55; }
+QPushButton#btnSuccess:hover { background: #25B061; }
+QPushButton#btnDanger { background: #D13438; }
+QPushButton#btnDanger:hover { background: #E04044; }
+QPushButton#btnWarning { background: #E0A100; color: #1A1300; }
+QPushButton#btnWarning:hover { background: #F0B000; }
+QPushButton#btnGhost { background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A; }
+QPushButton#btnGhost:hover { background: #3D3D3D; }
+QCheckBox { color: #E0E0E0; spacing: 7px; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #6A6A6A; background: #202020; }
+QCheckBox::indicator:checked { background: #CFCFCF; border: 1px solid #CFCFCF; }
 QTableWidget {
-    background: #151C2E; alternate-background-color: #182036;
-    color: #E8ECF4; gridline-color: #232D47; border: 1px solid #2A3550; border-radius: 10px;
+    background: #262626; alternate-background-color: #292929;
+    color: #FFFFFF; gridline-color: #262626; border: 1px solid #3A3A3A; border-radius: 10px;
 }
 QTableWidget::item { padding: 4px 6px; border: none; }
-QTableWidget::item:selected { background: rgba(108, 92, 231, 55); color: #FFFFFF; }
+QTableWidget::item:selected { background: #383838; color: #FFFFFF; }
 QHeaderView::section {
-    background: #1E2942; color: #9AA3BB; border: none; border-bottom: 1px solid #2A3550;
-    padding: 9px 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;
+    background: #2F2F2F; color: #9D9D9D; border: none; border-bottom: 1px solid #3A3A3A;
+    padding: 9px 6px; font-weight: 700; font-size: 11px;
 }
 QHeaderView::section:first { border-top-left-radius: 10px; }
 QHeaderView::section:last { border-top-right-radius: 10px; }
-QTableCornerButton::section { background: #1E2942; border: none; }
+QTableCornerButton::section { background: #2F2F2F; border: none; }
 QPlainTextEdit {
-    background: #0B0F1A; color: #C9D4E8; border: 1px solid #2A3550;
-    border-radius: 10px; padding: 8px; selection-background-color: #6C5CE7;
+    background: #1A1A1A; color: #D0D0D0; border: 1px solid #3A3A3A;
+    border-radius: 10px; padding: 8px; selection-background-color: #5A5A5A;
 }
 QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; background: transparent; }
-QStatusBar { background: #121826; color: #8B93A7; border-top: 1px solid #232D47; }
+QStatusBar { background: #1B1B1B; color: #9D9D9D; border-top: 1px solid #3A3A3A; }
 QStatusBar::item { border: none; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 8px; }
 QScrollBar:vertical { background: transparent; width: 11px; margin: 2px; }
-QScrollBar::handle:vertical { background: #2E3A5C; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #6C5CE7; }
+QScrollBar::handle:vertical { background: #4A4A4A; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #6A6A6A; }
 QScrollBar:horizontal { background: transparent; height: 11px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #2E3A5C; border-radius: 5px; min-width: 30px; }
+QScrollBar::handle:horizontal { background: #4A4A4A; border-radius: 5px; min-width: 30px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-QToolTip { background: #232C47; color: #E8ECF4; border: 1px solid #2A3550; padding: 5px; }
+QToolTip { background: #333333; color: #FFFFFF; border: 1px solid #4A4A4A; padding: 5px; }
 """
 
 
@@ -363,7 +394,7 @@ class Win(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bot Manager")
+        self.setWindowTitle("BOT SPOT")
         self.setWindowIcon(app_icon())
         self.resize(1180, 780)
         self.ssh = SSH()
@@ -378,7 +409,7 @@ class Win(QMainWindow):
         pix = QPixmap(resource_path("icon.png"))
         if not pix.isNull():
             logo.setPixmap(pix.scaled(46, 46, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        title = QLabel("BOT MANAGER")
+        title = QLabel("BOT SPOT")
         title.setObjectName("title")
         subtitle = QLabel("панель управления ботами · SSH + systemd")
         subtitle.setObjectName("subtitle")
@@ -401,12 +432,14 @@ class Win(QMainWindow):
         self.prof.addItem("— новое подключение —")
         self.prof.addItems(self.cfg["profiles"].keys())
         self.prof.setMinimumWidth(170)
-        self.btn_rename = QPushButton("✏️")
-        self.btn_delete = QPushButton("🗑️")
+        self.btn_rename = QPushButton()
+        self.btn_delete = QPushButton()
         for b in (self.btn_rename, self.btn_delete):
             b.setObjectName("btnGhost")
             b.setFixedWidth(40)
             b.setCursor(Qt.PointingHandCursor)
+        self.btn_rename.setIcon(load_icon("pencil"))
+        self.btn_delete.setIcon(load_icon("trash"))
         self.btn_rename.setToolTip("Переименовать выбранный профиль")
         self.btn_delete.setToolTip("Удалить выбранный профиль")
         prof_bar = QHBoxLayout()
@@ -431,9 +464,10 @@ class Win(QMainWindow):
         self.remember = QCheckBox("запомнить")
         self.remember.setChecked(bool(keyring))
         self.remember.setEnabled(bool(keyring))
-        self.btn_conn = QPushButton("⚡ Подключиться")
+        self.btn_conn = QPushButton("Подключиться")
         self.btn_conn.setObjectName("btnPrimary")
         self.btn_conn.setCursor(Qt.PointingHandCursor)
+        self.btn_conn.setIcon(load_icon("plug", "#FFFFFF"))
 
         conn_grid = QGridLayout()
         conn_grid.setSpacing(8)
@@ -455,14 +489,18 @@ class Win(QMainWindow):
         # --- панель действий + таблица ---
         self.only_tg = QCheckBox("Только Telegram-боты")
         self.only_tg.setChecked(True)
-        self.btn_start = QPushButton("▶ Старт")
-        self.btn_stop = QPushButton("■ Стоп")
-        self.btn_restart = QPushButton("⟳ Рестарт")
-        self.btn_refresh = QPushButton("↻ Обновить")
+        self.btn_start = QPushButton("Старт")
+        self.btn_stop = QPushButton("Стоп")
+        self.btn_restart = QPushButton("Рестарт")
+        self.btn_refresh = QPushButton("Обновить")
         self.btn_start.setObjectName("btnSuccess")
         self.btn_stop.setObjectName("btnDanger")
         self.btn_restart.setObjectName("btnWarning")
         self.btn_refresh.setObjectName("btnGhost")
+        self.btn_start.setIcon(load_icon("play", "#FFFFFF"))
+        self.btn_stop.setIcon(load_icon("stop", "#FFFFFF"))
+        self.btn_restart.setIcon(load_icon("refresh", "#1A1300"))
+        self.btn_refresh.setIcon(load_icon("refresh"))
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_refresh, self.btn_conn):
             b.setCursor(Qt.PointingHandCursor)
         bar = QHBoxLayout()
@@ -483,6 +521,7 @@ class Win(QMainWindow):
         self.table.verticalHeader().setDefaultSectionSize(33)
         h = self.table.horizontalHeader()
         h.setHighlightSections(False)
+        h.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         h.setSectionResizeMode(QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.Stretch)
 
@@ -504,9 +543,12 @@ class Win(QMainWindow):
         self.lines.setRange(20, 5000)
         self.lines.setValue(200)
         self.live = QCheckBox("Live (2 сек)")
-        self.log_title = QLabel("📜 Логи: выбери бота")
+        self.log_title = QLabel("Логи: выбери бота")
         self.log_title.setObjectName("h2")
+        self.log_icon = QLabel()
+        self.log_icon.setPixmap(load_icon("scroll").pixmap(16, 16))
         lbar = QHBoxLayout()
+        lbar.addWidget(self.log_icon)
         lbar.addWidget(self.log_title)
         lbar.addStretch()
         lbar.addWidget(QLabel("строк:"))
@@ -532,8 +574,8 @@ class Win(QMainWindow):
         rl.setContentsMargins(14, 12, 14, 12)
         rl.setSpacing(12)
         # --- переключатель режимов (Боты / Файлы) ---
-        self.btn_mode_bots = QPushButton("🤖 Боты")
-        self.btn_mode_files = QPushButton("📁 Файлы")
+        self.btn_mode_bots = QPushButton("Боты")
+        self.btn_mode_files = QPushButton("Файлы")
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
         seg = QHBoxLayout()
@@ -727,6 +769,9 @@ class Win(QMainWindow):
     def render(self):
         sel = self.current()
         rows = [r for r in self.rows if not self.only_tg.isChecked() or r["kind"] == "Telegram"]
+        docker_icon = load_icon("docker")
+        kind_fg, kind_bg = QColor("#E0E0E0"), QColor(255, 255, 255, 14)
+        status_tx = QColor("#E0E0E0")
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
@@ -736,14 +781,9 @@ class Win(QMainWindow):
                 dot = QColor("#F87171")
             else:
                 dot = QColor("#8B93A7")
-            kinds = {"Telegram": ("#7DD3FC", (56, 189, 248, 42)),
-                     "Python": ("#FCD34D", (251, 191, 36, 38)),
-                     "Go": ("#5EEAD4", (45, 212, 191, 38)),
-                     "Docker": ("#93C5FD", (147, 197, 253, 38)),
-                     "Node": ("#86EFAC", (134, 239, 172, 34))}
-            fg, bg = kinds.get(r["kind"], ("#9CA3AF", (156, 163, 175, 30)))
-            kind_fg, kind_bg = QColor(fg), QColor(*bg)
-            vals = ["●", r["name"], r["kind"], f'{r["active"]} ({r["sub"]})', r["pid"] if r["pid"] != "0" else "",
+            is_dock = r["name"].startswith("🐳 ")
+            disp_name = strip_docker_prefix(r["name"])
+            vals = ["●", disp_name, r["kind"], f'{r["active"]} ({r["sub"]})', r["pid"] if r["pid"] != "0" else "",
                     f'{r["mem"]:.1f}' if r["mem"] is not None else "", f'{r["cpu"]:.1f}' if r["cpu"] is not None else "", r["since"]]
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
@@ -756,19 +796,21 @@ class Win(QMainWindow):
                     ff = QFont(FONT_UI, 13)
                     it.setFont(ff)
                     it.setTextAlignment(Qt.AlignCenter)
+                if j == 1 and is_dock:
+                    it.setIcon(docker_icon)
                 if j == 2:
                     it.setForeground(kind_fg)
                     it.setBackground(kind_bg)
                     it.setTextAlignment(Qt.AlignCenter)
                 if j == 3:
-                    it.setForeground(dot)
+                    it.setForeground(status_tx)
                 self.table.setItem(i, j, it)
             if r["name"] == sel:
                 self.table.selectRow(i)
         self.table.blockSignals(False)
         self.shown = rows
         n_run = sum(1 for r in rows if r["active"] == "active")
-        self.stats.setText(f"🤖 {len(rows)} ботов · 🟢 {n_run} запущено")
+        self.stats.setText(f"{len(rows)} ботов · {n_run} запущено")
         self.statusBar().showMessage(f"Ботов: {len(rows)}, запущено: {n_run}")
 
     def current(self):
@@ -817,7 +859,7 @@ class Win(QMainWindow):
         if not name or not self.ssh.client:
             return
         self.log_name = name
-        self.log_title.setText(f"📜 Логи: {name}")
+        self.log_title.setText(f"Логи: {strip_docker_prefix(name)}")
         n = self.lines.value()
 
         def done(res, err):
