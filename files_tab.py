@@ -21,11 +21,11 @@ from typing import Callable, Optional
 
 import paramiko
 from PySide6.QtCore import QDir, QMimeData, QObject, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QDrag
+from PySide6.QtGui import QAction, QDesktopServices, QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QProgressBar, QPushButton, QSplitter, QStyle, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -784,25 +784,27 @@ class FilePane(QFrame):
         self.edit_path = QLineEdit()
         self.edit_path.setPlaceholderText("путь…")
         self.edit_path.returnPressed.connect(self._on_path_entered)
-        self.btn_up = QPushButton("↑")
+        self.btn_up = QPushButton()
         self.btn_up.setObjectName("btnGhost")
         self.btn_up.setFixedWidth(36)
+        self.btn_up.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
         self.btn_up.setToolTip("Вверх")
         self.btn_up.setCursor(Qt.PointingHandCursor)
         self.btn_up.clicked.connect(self.go_parent)
-        self.btn_refresh = QPushButton("↻")
+        self.btn_refresh = QPushButton()
         self.btn_refresh.setObjectName("btnGhost")
         self.btn_refresh.setFixedWidth(36)
+        self.btn_refresh.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         self.btn_refresh.setToolTip("Обновить")
         self.btn_refresh.setCursor(Qt.PointingHandCursor)
         self.btn_refresh.clicked.connect(self.reload)
         self.chk_hidden = QCheckBox("скрытые")
         self.chk_hidden.toggled.connect(self._on_hidden_toggled)
-        self.btn_mkdir = QPushButton("＋ папка")
+        self.btn_mkdir = QPushButton("+ Папка")
         self.btn_mkdir.setObjectName("btnGhost")
         self.btn_mkdir.setCursor(Qt.PointingHandCursor)
         self.btn_mkdir.clicked.connect(self.do_mkdir)
-        self.btn_send = QPushButton("Загрузить ⬆" if side == "local" else "⬇ Скачать")
+        self.btn_send = QPushButton("Загрузить ↑" if side == "local" else "↓ Скачать")
         self.btn_send.setObjectName("btnPrimary")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.send_selected)
@@ -842,6 +844,11 @@ class FilePane(QFrame):
         self._sc_del.setShortcut(Qt.Key_Delete)
         self._sc_del.triggered.connect(self.do_delete)
         self.addAction(self._sc_del)
+        self._sc_open = QAction(self.table)
+        self._sc_open.setShortcut(Qt.Key_Return)
+        self._sc_open.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self._sc_open.triggered.connect(self._on_enter_pressed)
+        self.table.addAction(self._sc_open)
         lay.addWidget(self.table, 1)
 
     # --- backend ---
@@ -865,8 +872,11 @@ class FilePane(QFrame):
 
         def done(res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                msg = friendly(err)
+                self.status_message.emit(msg)
                 self.edit_path.setText(self._pretty_path())
+                if not self.entries:
+                    self.show_notice(msg)
                 return
             _path, entries = res
             self.path = _path
@@ -906,11 +916,41 @@ class FilePane(QFrame):
         files = sorted([e for e in items if not e.is_dir], key=key, reverse=self.sort_desc)
         return dirs + files
 
+    def _show_dotdot(self) -> bool:
+        """Строка '..' — везде, кроме корня (там выше идти некуда)."""
+        if self.backend is None:
+            return False
+        if self.side == "local":
+            return bool(self.path)
+        return self.path not in ("", "/")
+
+    def show_notice(self, text: str) -> None:
+        """Заглушка вместо пустой таблицы: 'нет подключения', текст ошибки и т.п."""
+        self.table.clearSpans()
+        self.table.setRowCount(1)
+        it = QTableWidgetItem(f"  {text}")
+        it.setFlags(Qt.NoItemFlags)
+        it.setData(Qt.UserRole, {"dotdot": False, "entry": None})
+        self.table.setItem(0, 0, it)
+        if self.table.columnCount() > 1:
+            self.table.setSpan(0, 0, 1, self.table.columnCount())
+
     def _render(self) -> None:
+        self.table.clearSpans()
         rows = self._visible()
         show_mode = self.table.columnCount() == 4
-        self.table.setRowCount(len(rows))
-        for i, e in enumerate(rows):
+        dotdot = self._show_dotdot()
+        self.table.setRowCount(len(rows) + (1 if dotdot else 0))
+        start = 0
+        if dotdot:
+            it = QTableWidgetItem("📁 ..")
+            it.setData(Qt.UserRole, {"dotdot": True, "entry": None})
+            self.table.setItem(0, 0, it)
+            for j in range(1, self.table.columnCount()):
+                self.table.setItem(0, j, QTableWidgetItem(""))
+            start = 1
+        for k, e in enumerate(rows):
+            i = k + start
             icon = "📁" if e.is_dir else ("🔗" if e.is_link else "📄")
             name = f"{icon} {e.name}" + (" →" if e.is_link else "")
             vals = [name,
@@ -918,7 +958,7 @@ class FilePane(QFrame):
                     fmt_time(e.mtime)] + ([e.mode if not e.is_dir or e.mode else ""] if show_mode else [])
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                it.setData(Qt.UserRole, e)
+                it.setData(Qt.UserRole, {"dotdot": False, "entry": e})
                 self.table.setItem(i, j, it)
         arrows = {0: " ▲" if not self.sort_desc else " ▼"}.get(self.sort_col, "")
         base = self.COLS_REMOTE if show_mode else self.COLS_LOCAL
@@ -932,20 +972,34 @@ class FilePane(QFrame):
             self.sort_col, self.sort_desc = col, False
         self._render()
 
-    def _entry_at_row(self, row: int) -> Optional[Entry]:
+    def _row_info(self, row: int) -> dict:
         it = self.table.item(row, 0)
-        return it.data(Qt.UserRole) if it else None
+        return it.data(Qt.UserRole) if it else {}
 
     def selected_entries(self) -> list[Entry]:
         rows = sorted({it.row() for it in self.table.selectedItems()})
-        return [e for r in rows if (e := self._entry_at_row(r))]
+        out = []
+        for r in rows:
+            info = self._row_info(r) or {}
+            if not info.get("dotdot") and info.get("entry") is not None:
+                out.append(info["entry"])
+        return out
+
+    def _selection_has_dotdot(self) -> bool:
+        for it in self.table.selectedItems():
+            if it.column() == 0 and ((it.data(Qt.UserRole) or {}).get("dotdot")):
+                return True
+        return False
 
     def selected_full_paths(self) -> list[str]:
         be = self.backend
         return [be.join(self.path, e.name) for e in self.selected_entries()] if be else []
 
     def _on_double_click(self, item: QTableWidgetItem) -> None:
-        e = item.data(Qt.UserRole)
+        info = item.data(Qt.UserRole) or {}
+        if info.get("dotdot"):
+            return self.go_parent()
+        e = info.get("entry")
         if e is None:
             return
         if e.is_dir:
@@ -953,6 +1007,23 @@ class FilePane(QFrame):
         else:
             full = self.backend.join(self.path, e.name)
             self.transfer_requested.emit(self.side, [full], "")
+
+    def _on_enter_pressed(self) -> None:
+        rows = sorted({it.row() for it in self.table.selectedItems() if it.column() == 0})
+        if len(rows) != 1:
+            return
+        info = self._row_info(rows[0]) or {}
+        if info.get("dotdot"):
+            return self.go_parent()
+        e = info.get("entry")
+        if e is None:
+            return
+        if e.is_dir:
+            self.go(self.backend.join(self.path, e.name))
+        elif self.side == "local":
+            self.do_open_local()
+        else:
+            self.send_selected()
 
     def send_selected(self) -> None:
         paths = self.selected_full_paths()
@@ -964,18 +1035,24 @@ class FilePane(QFrame):
     # --- контекстное меню и операции ---
     def _on_context_menu(self, pos) -> None:
         sel = self.selected_entries()
+        dotdot = self._selection_has_dotdot()
         m = QMenu(self)
-        a_go = m.addAction("⬆ Загрузить" if self.side == "local" else "⬇ Скачать")
-        a_go.setEnabled(bool(sel))
+        if self.side == "local":
+            a_open = m.addAction("📂 Открыть")
+            a_open.setEnabled(len(sel) == 1 and not dotdot)
+            a_open.triggered.connect(self.do_open_local)
+            m.addSeparator()
+        a_go = m.addAction("↑ Загрузить" if self.side == "local" else "↓ Скачать")
+        a_go.setEnabled(bool(sel) and not dotdot)
         a_go.triggered.connect(self.send_selected)
         m.addSeparator()
         a_mkdir = m.addAction("Новая папка")
         a_mkdir.triggered.connect(self.do_mkdir)
         a_ren = m.addAction("Переименовать (F2)")
-        a_ren.setEnabled(len(sel) == 1)
+        a_ren.setEnabled(len(sel) == 1 and not dotdot)
         a_ren.triggered.connect(self.do_rename)
         a_del = m.addAction("Удалить (Del)")
-        a_del.setEnabled(bool(sel))
+        a_del.setEnabled(bool(sel) and not dotdot)
         a_del.triggered.connect(self.do_delete)
         a_chmod = None
         if self.side == "remote":
@@ -983,7 +1060,7 @@ class FilePane(QFrame):
             a_chmod.setEnabled(len(sel) == 1)
             a_chmod.triggered.connect(self.do_chmod)
         a_copy = m.addAction("Копировать путь")
-        a_copy.setEnabled(len(sel) == 1)
+        a_copy.setEnabled(len(sel) == 1 and not dotdot)
         a_copy.triggered.connect(self.do_copy_path)
         m.addSeparator()
         a_ref = m.addAction("Обновить")
@@ -1088,6 +1165,17 @@ class FilePane(QFrame):
 
         self.runner.submit(lambda: be.chmod(full, mode), done)
 
+    def do_open_local(self) -> None:
+        """Открыть файл/папку программой Windows по умолчанию. Только левая панель."""
+        sel = self.selected_entries()
+        if len(sel) != 1 or self.side != "local":
+            return
+        full = self._full(sel[0])
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(full)):
+            self.status_message.emit(f"Открываю: {sel[0].name}")
+        else:
+            self.status_message.emit(f"Не удалось открыть: {full}")
+
     def do_copy_path(self) -> None:
         sel = self.selected_entries()
         if len(sel) == 1:
@@ -1179,7 +1267,7 @@ class QueueWidget(QFrame):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self._rows[job_id] = row
-        arrow = "⬆" if direction == "up" else "⬇"
+        arrow = "↑" if direction == "up" else "↓"
         self.table.setItem(row, 0, QTableWidgetItem(display))
         self.table.setItem(row, 1, QTableWidgetItem(arrow))
         bar = QProgressBar()
@@ -1188,7 +1276,7 @@ class QueueWidget(QFrame):
         self.table.setCellWidget(row, 2, bar)
         self.table.setItem(row, 3, QTableWidgetItem(""))
         self.table.setItem(row, 4, QTableWidgetItem("В очереди"))
-        btn = QPushButton("✕")
+        btn = QPushButton("×")
         btn.setObjectName("btnGhost")
         btn.setFixedWidth(32)
         btn.setCursor(Qt.PointingHandCursor)
@@ -1283,6 +1371,7 @@ class FilesTab(QWidget):
         self.pane_remote = FilePane("remote", "🖥 Сервер", show_mode=True)
         self.pane_remote.chk_hidden.setChecked(bool(self._state.get("hidden", False)))
         self.pane_remote.show_hidden = bool(self._state.get("hidden", False))
+        self.pane_remote.show_notice("Подключитесь к серверу карточкой выше")
         for pane in (self.pane_local, self.pane_remote):
             pane.transfer_requested.connect(self._on_transfer_requested)
             pane.status_message.connect(self.set_status)
@@ -1397,7 +1486,7 @@ class FilesTab(QWidget):
         self.pane_remote.set_backend(None)
         self.pane_remote.entries = []
         self.pane_remote.path = ""
-        self.pane_remote._render()
+        self.pane_remote.show_notice("Нет соединения. Нажмите «Переподключить».")
 
     def _connect_async(self) -> None:
         self._reset_connection()
@@ -1482,7 +1571,7 @@ class FilesTab(QWidget):
             display = paths[0].split("/")[-1].split("\\")[-1] if len(paths) == 1 \
                 else f"{len(paths)} файлов"
             jid = self.manager.submit("up", display, paths, dst)
-            self.queue.add_job(jid, f"⬆ {display}", "up")
+            self.queue.add_job(jid, f"↑ {display}", "up")
             self.set_status(f"Загрузка: {display} → {dst}")
         else:
             dst = self.pane_local.path or self._local.home()
@@ -1491,7 +1580,7 @@ class FilesTab(QWidget):
             display = paths[0].rstrip("/").split("/")[-1] if len(paths) == 1 \
                 else f"{len(paths)} файлов"
             jid = self.manager.submit("down", display, paths, dst)
-            self.queue.add_job(jid, f"⬇ {display}", "down")
+            self.queue.add_job(jid, f"↓ {display}", "down")
             self.set_status(f"Скачивание: {display} → {dst}")
 
     def _on_job_done(self, job_id: int, ok: bool, message: str) -> None:
