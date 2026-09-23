@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from files_tab import FilesTab, SEG_QSS
 from backup_tab import BackupTab
+from deploy_tab import DeployTab
 
 try:
     import keyring  # пароль хранится в системном хранилище (Keychain / Credential Manager / Secret Service)
@@ -574,16 +575,18 @@ class Win(QMainWindow):
         rl = QVBoxLayout(root)
         rl.setContentsMargins(14, 12, 14, 12)
         rl.setSpacing(12)
-        # --- переключатель режимов (Боты / Файлы / Бэкапы) ---
+        # --- переключатель режимов (Боты / Файлы / Бэкапы / Деплой) ---
         self.btn_mode_bots = QPushButton("Боты")
         self.btn_mode_files = QPushButton("Файлы")
         self.btn_mode_backup = QPushButton("Бэкапы")
+        self.btn_mode_deploy = QPushButton("Деплой")
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
         seg = QHBoxLayout()
         seg.setSpacing(0)
-        seg_names = ("segLeft", "segMid", "segRight")
-        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files, self.btn_mode_backup)):
+        seg_names = ("segLeft", "segMid", "segMid2", "segRight")
+        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files,
+                               self.btn_mode_backup, self.btn_mode_deploy)):
             b.setCheckable(True)
             b.setObjectName(seg_names[i])
             b.setCursor(Qt.PointingHandCursor)
@@ -597,12 +600,15 @@ class Win(QMainWindow):
 
         self.files_tab = FilesTab()
         self.backup_tab = BackupTab()
+        self.deploy_tab = DeployTab()
         self.pages = QStackedWidget()
         self.pages.addWidget(split)         # 0 — Боты: ровно тот же split, что и раньше
         self.pages.addWidget(self.files_tab)  # 1 — Файлы
         self.pages.addWidget(self.backup_tab)  # 2 — Бэкапы
+        self.pages.addWidget(self.deploy_tab)  # 3 — Деплой
         mode_group.idClicked.connect(self.pages.setCurrentIndex)
         mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
+        self.deploy_tab.open_bots_requested.connect(lambda: self.pages.setCurrentIndex(0))
 
         rl.addLayout(head)
         rl.addWidget(conn_card)
@@ -753,6 +759,7 @@ class Win(QMainWindow):
             self.refresh()
             self.files_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
             self.backup_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
+            self.deploy_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
 
         bg(job, done)
 

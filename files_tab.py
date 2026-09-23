@@ -47,15 +47,15 @@ if not _log.handlers:
 
 # ---------- стили (живут здесь, THEME_QSS не трогаем) ----------
 SEG_QSS = """
-QPushButton#segLeft, QPushButton#segMid, QPushButton#segRight {
+QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRight {
     background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
 QPushButton#segLeft { border-top-left-radius: 10px; border-bottom-left-radius: 10px; border-right: none; }
-QPushButton#segMid { border-radius: 0; border-right: none; }
+QPushButton#segMid, QPushButton#segMid2 { border-radius: 0; border-right: none; }
 QPushButton#segRight { border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
-QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segRight:hover { background: #3D3D3D; }
-QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segRight:checked {
+QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #3D3D3D; }
+QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
     background: #484848;
     color: #FFFFFF;
 }
