@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import paramiko
-from PySide6.QtCore import QDir, QMimeData, QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QDir, QMimeData, QObject, QProcess, QProcessEnvironment, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame,
@@ -47,14 +47,15 @@ if not _log.handlers:
 
 # ---------- стили (живут здесь, THEME_QSS не трогаем) ----------
 SEG_QSS = """
-QPushButton#segLeft, QPushButton#segRight {
+QPushButton#segLeft, QPushButton#segMid, QPushButton#segRight {
     background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
 QPushButton#segLeft { border-top-left-radius: 10px; border-bottom-left-radius: 10px; border-right: none; }
+QPushButton#segMid { border-radius: 0; border-right: none; }
 QPushButton#segRight { border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
-QPushButton#segLeft:hover, QPushButton#segRight:hover { background: #3D3D3D; }
-QPushButton#segLeft:checked, QPushButton#segRight:checked {
+QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segRight:hover { background: #3D3D3D; }
+QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segRight:checked {
     background: #484848;
     color: #FFFFFF;
 }
@@ -132,6 +133,45 @@ def friendly(e: BaseException) -> str:
             or "not connected" in s.lower() or "No such file" in s:
         return f"Нет соединения / нет файла: {s}"
     return s
+
+
+def sanitized_env(env: Optional[dict] = None) -> dict:
+    """Копия окружения без мусора замороженного приложения.
+
+    PySide6 дописывает свой каталог в PATH, а в exe-сборке это Temp/_MEI... —
+    дочерняя Qt-программа (напр. DB Browser for SQLite) находит там чужие
+    плагины и падает с 'невалидными метаданными' в .dll. Вычищаем такие пути
+    и QT_*/QML_*/PYSIDE_*-переменные перед запуском внешних программ.
+    """
+    src = dict(os.environ) if env is None else dict(env)
+    out = {}
+    for k, v in src.items():
+        ku = k.upper()
+        if ku.startswith(("QT_", "QML_", "PYSIDE_")):
+            continue
+        if ku == "PATH" and isinstance(v, str):
+            v = os.pathsep.join(p for p in v.split(os.pathsep) if p and "_mei" not in p.lower())
+        out[k] = v
+    return out
+
+
+def open_local_file(path: str) -> bool:
+    """Открыть файл/папку программой по умолчанию с чистым окружением (см. sanitized_env)."""
+    if os.name != "nt":
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+    proc = QProcess()
+    pe = QProcessEnvironment()
+    for k, v in sanitized_env().items():
+        pe.insert(k, v)
+    proc.setProcessEnvironment(pe)
+    proc.setProgram("cmd")
+    proc.setArguments(["/c", "start", "", os.path.normpath(path)])
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+    except (ValueError, OSError):
+        d = os.path.expanduser("~")
+    proc.setWorkingDirectory(d)
+    return proc.startDetached()
 
 
 # ---------- фоновый runner (свой, botmanager.bg использовать нельзя) ----------
@@ -1176,7 +1216,7 @@ class FilePane(QFrame):
         if len(sel) != 1 or self.side != "local":
             return
         full = self._full(sel[0])
-        if QDesktopServices.openUrl(QUrl.fromLocalFile(full)):
+        if open_local_file(full):
             self.status_message.emit(f"Открываю: {sel[0].name}")
         else:
             self.status_message.emit(f"Не удалось открыть: {full}")

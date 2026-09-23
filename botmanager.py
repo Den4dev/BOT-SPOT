@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from files_tab import FilesTab, SEG_QSS
+from backup_tab import BackupTab
 
 try:
     import keyring  # пароль хранится в системном хранилище (Keychain / Credential Manager / Secret Service)
@@ -573,16 +574,18 @@ class Win(QMainWindow):
         rl = QVBoxLayout(root)
         rl.setContentsMargins(14, 12, 14, 12)
         rl.setSpacing(12)
-        # --- переключатель режимов (Боты / Файлы) ---
+        # --- переключатель режимов (Боты / Файлы / Бэкапы) ---
         self.btn_mode_bots = QPushButton("Боты")
         self.btn_mode_files = QPushButton("Файлы")
+        self.btn_mode_backup = QPushButton("Бэкапы")
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
         seg = QHBoxLayout()
         seg.setSpacing(0)
-        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files)):
+        seg_names = ("segLeft", "segMid", "segRight")
+        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files, self.btn_mode_backup)):
             b.setCheckable(True)
-            b.setObjectName("segLeft" if i == 0 else "segRight")
+            b.setObjectName(seg_names[i])
             b.setCursor(Qt.PointingHandCursor)
             mode_group.addButton(b, i)
             seg.addWidget(b)
@@ -593,9 +596,11 @@ class Win(QMainWindow):
         head.insertWidget(3, seg_wrap)  # между заголовком и pill со статистикой
 
         self.files_tab = FilesTab()
+        self.backup_tab = BackupTab()
         self.pages = QStackedWidget()
         self.pages.addWidget(split)         # 0 — Боты: ровно тот же split, что и раньше
         self.pages.addWidget(self.files_tab)  # 1 — Файлы
+        self.pages.addWidget(self.backup_tab)  # 2 — Бэкапы
         mode_group.idClicked.connect(self.pages.setCurrentIndex)
         mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
 
@@ -747,6 +752,7 @@ class Win(QMainWindow):
             self.t_refresh.start()
             self.refresh()
             self.files_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
+            self.backup_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
 
         bg(job, done)
 
