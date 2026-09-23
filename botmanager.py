@@ -11,10 +11,12 @@ import paramiko
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
+
+from files_tab import FilesTab, SEG_QSS
 
 try:
     import keyring  # пароль хранится в системном хранилище (Keychain / Credential Manager / Secret Service)
@@ -529,9 +531,35 @@ class Win(QMainWindow):
         rl = QVBoxLayout(root)
         rl.setContentsMargins(14, 12, 14, 12)
         rl.setSpacing(12)
+        # --- переключатель режимов (Боты / Файлы) ---
+        self.btn_mode_bots = QPushButton("🤖 Боты")
+        self.btn_mode_files = QPushButton("📁 Файлы")
+        mode_group = QButtonGroup(self)
+        mode_group.setExclusive(True)
+        seg = QHBoxLayout()
+        seg.setSpacing(0)
+        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files)):
+            b.setCheckable(True)
+            b.setObjectName("segLeft" if i == 0 else "segRight")
+            b.setCursor(Qt.PointingHandCursor)
+            mode_group.addButton(b, i)
+            seg.addWidget(b)
+        self.btn_mode_bots.setChecked(True)
+        seg_wrap = QWidget()
+        seg_wrap.setStyleSheet(SEG_QSS)
+        seg_wrap.setLayout(seg)
+        head.insertWidget(3, seg_wrap)  # между заголовком и pill со статистикой
+
+        self.files_tab = FilesTab()
+        self.pages = QStackedWidget()
+        self.pages.addWidget(split)         # 0 — Боты: ровно тот же split, что и раньше
+        self.pages.addWidget(self.files_tab)  # 1 — Файлы
+        mode_group.idClicked.connect(self.pages.setCurrentIndex)
+        mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
+
         rl.addLayout(head)
         rl.addWidget(conn_card)
-        rl.addWidget(split, 1)
+        rl.addWidget(self.pages, 1)
         self.setCentralWidget(root)
 
         self.btn_conn.clicked.connect(self.connect_ssh)
@@ -676,6 +704,7 @@ class Win(QMainWindow):
             self.statusBar().showMessage(f"Подключено: {name}")
             self.t_refresh.start()
             self.refresh()
+            self.files_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
 
         bg(job, done)
 
