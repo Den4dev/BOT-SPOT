@@ -11,6 +11,7 @@ import queue as queue_mod
 import re
 import shlex
 import socket
+import stat
 import tempfile
 import threading
 import time
@@ -646,28 +647,86 @@ class DeployEngine(QObject):
 
     def _pack(self, local_dir: str, dir_excludes: set, file_excludes: set,
               protected: Optional[list] = None):
-        """Zip проекта во временный файл. Возвращает (путь, размер)."""
-        import fnmatch
+        """Zip проекта во временный файл. Возвращает (путь, размер).
+
+        Две фазы: быстрый сбор списка (сразу видно объём) + упаковка с
+        прогрессом и проверкой отмены. Необычные файлы (ссылки в никуда,
+        fifo/сокеты) пропускаются с пометкой в журнале, а не вешают процесс.
+        """
         protected = protected or []
+        root = Path(local_dir)
+        items = []  # (full, rel, size)
+        skipped = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel_dir = os.path.relpath(dirpath, root)
+            parts = set(Path(rel_dir).parts) if rel_dir != "." else set()
+            if parts & dir_excludes:
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d not in dir_excludes]
+            for fn in filenames:
+                if fn.endswith(".pyc"):
+                    continue
+                full = os.path.join(dirpath, fn)
+                rel = fn if rel_dir == "." else rel_dir.replace(os.sep, "/") + "/" + fn
+                if self._protected_match(rel, protected):
+                    continue
+                try:
+                    lst = os.lstat(full)
+                except OSError:
+                    skipped.append(rel + " (не читается)")
+                    continue
+                if stat.S_ISLNK(lst.st_mode):
+                    try:
+                        tgt = os.stat(full)
+                    except OSError:
+                        skipped.append(rel + " (битая ссылка)")
+                        continue
+                    if not stat.S_ISREG(tgt.st_mode):
+                        skipped.append(rel + " (ссылка не на файл)")
+                        continue
+                    size = tgt.st_size
+                elif stat.S_ISREG(lst.st_mode):
+                    size = lst.st_size
+                else:
+                    skipped.append(rel + " (не обычный файл)")
+                    continue
+                items.append((full, rel.replace(os.sep, "/"), size))
+        total = sum(s for _, _, s in items)
+        self.sig_log.emit(f"Упаковка: {len(items)} файлов, ~{human_size(total)}")
+        if items:
+            big = sorted(items, key=lambda t: t[2], reverse=True)[:5]
+            self.sig_log.emit("Самые тяжёлые: " + ", ".join(
+                f"{r} ({human_size(s)})" for _, r, s in big))
+        for s in skipped[:5]:
+            self.sig_log.emit(f"Пропущен: {s}")
+        if len(skipped) > 5:
+            self.sig_log.emit(f"…и ещё пропущено: {len(skipped) - 5}")
         fd, tmp = tempfile.mkstemp(prefix="botmgr_", suffix=".zip")
         os.close(fd)
-        root = Path(local_dir)
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-            for dirpath, dirnames, filenames in os.walk(root):
-                rel_dir = os.path.relpath(dirpath, root)
-                parts = set(Path(rel_dir).parts) if rel_dir != "." else set()
-                if parts & dir_excludes:
-                    dirnames[:] = []
-                    continue
-                dirnames[:] = [d for d in dirnames if d not in dir_excludes]
-                for fn in filenames:
-                    if fn.endswith(".pyc"):
-                        continue
-                    rel = fn if rel_dir == "." else rel_dir.replace(os.sep, "/") + "/" + fn
-                    if self._protected_match(rel, protected):
-                        continue
-                    z.write(os.path.join(dirpath, fn), rel.replace(os.sep, "/"))
-        return tmp, os.path.getsize(tmp)
+        try:
+            done_b = 0
+            done_n = 0
+            last_t = time.monotonic()
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for full, rel, size in items:
+                    self._check_cancel()
+                    z.write(full, rel)
+                    done_b += size
+                    done_n += 1
+                    now = time.monotonic()
+                    if now - last_t >= 0.2 or done_n == len(items):
+                        last_t = now
+                        self.sig_log.emit(f"Упаковка: {done_n}/{len(items)}…")
+                    self.sig_progress.emit(done_b, total)
+            return tmp, os.path.getsize(tmp)
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _protected_match(rel: str, patterns: list) -> bool:
