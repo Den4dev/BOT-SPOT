@@ -52,9 +52,9 @@ QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRig
     background: #12304D; color: #D5E3F0; border: 1px solid #235074;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
-QPushButton#segLeft { border-top-left-radius: 6px; border-bottom-left-radius: 6px; border-right: none; }
+QPushButton#segLeft { border-radius: 0; border-top-left-radius: 6px; border-bottom-left-radius: 6px; border-right: none; }
 QPushButton#segMid, QPushButton#segMid2 { border-radius: 0; border-right: none; }
-QPushButton#segRight { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QPushButton#segRight { border-radius: 0; border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
 QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #1A4066; }
 QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
     background: #168AF5;

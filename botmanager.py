@@ -4,6 +4,7 @@ import base64
 import json
 import re
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -40,7 +41,7 @@ SKIP_BIN_PREFIX = ("/usr/bin", "/usr/sbin", "/usr/lib", "/bin", "/sbin", "/lib",
                    "/run", "/proc", "/sys", "/dev", "/var/lib/docker")
 NEW_PROF = "— новое подключение —"
 # локальная пара ключей для беспарольного терминала (wt/ssh подставляет -i)
-BOOT_KEY = Path.home() / ".ssh" / "botspot_term_rsa"
+BOOT_KEY = Path.home() / ".ssh" / "botspot_terminal"
 BOOT_COMMENT = "botspot-terminal"
 FIELDS = "Id,ActiveState,SubState,MainPID,ExecStart,WorkingDirectory,FragmentPath,ActiveEnterTimestamp"
 
@@ -300,15 +301,33 @@ class SSH:
 
 
 def boot_key_pair():
-    """Локальная пара ключей для терминала: (путь к приватному, строка публичного)."""
+    """Локальная пара ключей терминала: (приватный, публичным одной строкой).
+
+    ed25519 через ssh-keygen: современные sshd отключили подпись rsa-sha1,
+    с RSA Windows-клиент так и просил бы пароль.
+    """
     pub_file = Path(str(BOOT_KEY) + ".pub")
     if not BOOT_KEY.exists():
-        k = paramiko.RSAKey.generate(2048)
         BOOT_KEY.parent.mkdir(parents=True, exist_ok=True)
-        k.write_private_key_file(str(BOOT_KEY))
-        pub_file.write_text(f"ssh-rsa {k.get_base64()} {BOOT_COMMENT}\n", encoding="ascii")
-    pub = pub_file.read_text(encoding="ascii").strip()
-    return str(BOOT_KEY), pub
+        try:
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(BOOT_KEY),
+                            "-N", "", "-C", BOOT_COMMENT, "-q"],
+                           check=True, capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:
+            k = paramiko.RSAKey.generate(2048)
+            k.write_private_key_file(str(BOOT_KEY))
+            pub_file.write_text(f"ssh-rsa {k.get_base64()} {BOOT_COMMENT}\n", encoding="ascii")
+    if not pub_file.exists():
+        for cls in (paramiko.Ed25519Key, paramiko.RSAKey):
+            try:
+                k = cls(filename=str(BOOT_KEY))
+                pub_file.write_text(f"{k.get_name()} {k.get_base64()} {BOOT_COMMENT}\n",
+                                    encoding="ascii")
+                break
+            except Exception:
+                continue
+    return str(BOOT_KEY), pub_file.read_text(encoding="ascii").strip()
 
 
 def _exec_tokens(d):
@@ -1277,6 +1296,19 @@ class Win(QMainWindow):
             code, _, e = self.ssh.run(cmd)
             if code != 0:
                 raise RuntimeError((e or "").strip() or f"код {code}")
+            # проверка ровно тем способом, которым пойдёт ssh.exe: вход по ключу, без пароля/агента
+            probe = paramiko.SSHClient()
+            probe.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                probe.connect(host, port=int(port), username=user, key_filename=key_path,
+                              allow_agent=False, look_for_keys=False, timeout=10)
+            except Exception as ke:
+                raise RuntimeError(f"сервер не принял ключ: {ke}")
+            finally:
+                try:
+                    probe.close()
+                except Exception:
+                    pass
             return key_path
 
         def done(key_path, err):
