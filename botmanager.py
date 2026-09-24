@@ -1400,9 +1400,12 @@ class Win(QMainWindow):
 
         def job():
             key_path, pub = boot_key_pair()
-            cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-                   f" && grep -qF {shlex.quote(BOOT_COMMENT)} ~/.ssh/authorized_keys"
-                   f" || echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys")
+            # самоустановка: вычищаем любые строки с нашим маркером (в т.ч. устаревшие
+            # от прежних ключей) и дописываем ровно текущий публичный ключ
+            cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys"
+                   f" && {{ grep -vF {shlex.quote(BOOT_COMMENT)} ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp || true; }}"
+                   " && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+                   f" && echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys")
             code, _, e = self.ssh.run(cmd)
             if code != 0:
                 raise RuntimeError((e or "").strip() or f"код {code}")
