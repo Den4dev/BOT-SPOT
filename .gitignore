@@ -1,6 +1,28 @@
+# секреты
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+*.session
+
+# базы и окружения
+*.db
+*.sqlite
+*.sqlite3
+.venv/
+venv/
+
+# данные приложения на случай, если окажутся в проекте
+.botmanager*
+BotBackups/
+*.log
+
+# артефакты сборки
 build/
 dist/
 __pycache__/
 *.exe
-*.log
-.botmanager_files.json
