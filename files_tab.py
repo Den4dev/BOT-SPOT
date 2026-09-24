@@ -9,6 +9,7 @@ import logging
 import os
 import posixpath
 import queue as queue_mod
+import shlex
 import shutil
 import stat as statmod
 import threading
@@ -377,6 +378,39 @@ class SftpBackend:
         if not is_dir:
             self.s.remove(path)
             return
+        if not path.startswith("/") or path.rstrip("/") == "":
+            raise OSError(22, "Некорректный путь для удаления", path)
+        try:
+            self._exec_rm(path)
+        except Exception:
+            # сервер без exec-канала — старый обход по SFTP
+            self._remove_walk(path)
+        if self.exists(path):
+            raise OSError(39, "Папка не удалена", path)
+
+    def _exec_rm(self, path: str) -> None:
+        """rm -rf одной командой на сервере: быстрее и не рвёт SFTP-канал на больших деревьях."""
+        transport = self.s.get_channel().get_transport()
+        chan = transport.open_session()
+        try:
+            chan.exec_command(f"rm -rf -- {shlex.quote(path)}")
+            chan.shutdown_write()
+            err = b""
+            while not chan.exit_status_ready():
+                while chan.recv_stderr_ready():
+                    err += chan.recv_stderr(4096)
+                while chan.recv_ready():
+                    chan.recv(4096)
+                time.sleep(0.05)
+            while chan.recv_stderr_ready():
+                err += chan.recv_stderr(4096)
+            status = chan.recv_exit_status()
+        finally:
+            chan.close()
+        if status != 0:
+            raise OSError(status, err.decode("utf-8", "replace").strip() or "rm -rf failed", path)
+
+    def _remove_walk(self, path: str) -> None:
         # снизу вверх: сначала самое глубокое, корень — последним
         for dirpath, filenames, dirnames in reversed(list(self._walk(path))):
             for f in filenames:
