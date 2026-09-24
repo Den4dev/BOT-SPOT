@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """BOT SPOT: FileZilla для systemd-ботов. Подключился по SSH, видишь ботов, жмёшь кнопки."""
+import base64
 import json
 import re
 import shlex
 import sys
 import threading
+import time
 from pathlib import Path, PurePosixPath
 
 import paramiko
-from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPixmap, QRadialGradient, QSyntaxHighlighter,
                            QTextCharFormat)
@@ -16,13 +18,14 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGraphicsDropShadowEffect,
     QGridLayout, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
+    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QMenu, QFileDialog, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from files_tab import FilesTab, SEG_QSS
+from files_tab import FilesTab, SEG_QSS, sanitized_env
 from backup_tab import BackupTab
 from deploy_tab import DeployTab
+from env_editor import EnvDialog
 
 try:
     import keyring  # пароль хранится в системном хранилище (Keychain / Credential Manager / Secret Service)
@@ -448,6 +451,14 @@ def scan(ssh):
                     stats[p[0]] = (int(p[1]) / 1024, float(p[2]))
                 except ValueError:
                     pass
+    mem_total = None
+    try:
+        _, o, _ = ssh.run("grep MemTotal /proc/meminfo")
+        m = re.search(r"(\d+)", o or "")
+        if m:
+            mem_total = int(m.group(1)) / 1024
+    except Exception:
+        pass
 
     rows = []
     for i, u in enumerate(units):
@@ -456,11 +467,14 @@ def scan(ssh):
             "name": u["Id"], "kind": unit_kind(i, u, tg_hits, go_units),
             "active": u.get("ActiveState", ""), "sub": u.get("SubState", ""),
             "pid": u.get("MainPID", "0"), "mem": mem, "cpu": cpu,
+            "mem_total": mem_total, "dir": bot_dir(u),
             "since": u.get("ActiveEnterTimestamp", "") if u.get("ActiveState") == "active" else "",
         })
     for r in dock:
         if r["pid"]:
             r["mem"], r["cpu"] = stats.get(r["pid"], (None, None))
+        r.setdefault("dir", "")
+        r["mem_total"] = mem_total
     rows += dock
     return sorted(rows, key=lambda r: r["name"])
 
@@ -504,6 +518,7 @@ class Win(QMainWindow):
         self.rows = []
         self.busy = False
         self.log_name = None
+        self.log_raw = ""
         self.shown = []
 
         # --- шапка с эмблемкой ---
@@ -522,6 +537,11 @@ class Win(QMainWindow):
         tcol.addWidget(subtitle)
         self.stats = QLabel("нет подключения")
         self.stats.setObjectName("statsPill")
+        self.monitor = QLabel("—")
+        self.monitor.setObjectName("statsPill")
+        self.monitor.setToolTip("CPU · RAM · диск · сеть · load average")
+        self._net_prev = None
+        self._busy_mon = False
         head = QHBoxLayout()
         head.setSpacing(12)
         head.setContentsMargins(14, 10, 14, 10)
@@ -657,6 +677,26 @@ class Win(QMainWindow):
         lbar.addWidget(QLabel("строк:"))
         lbar.addWidget(self.lines)
         lbar.addWidget(self.live)
+        lbar2 = QHBoxLayout()
+        self.log_search = QLineEdit()
+        self.log_search.setPlaceholderText("поиск…")
+        self.log_search.setClearButtonEnabled(True)
+        self.log_search.textChanged.connect(lambda _t: self._render_logs())
+        self.log_level = QComboBox()
+        self.log_level.addItems(["Все строки", "Только ошибки", "Ошибки и предупреждения"])
+        self.log_level.currentIndexChanged.connect(lambda _i: self._render_logs())
+        self.btn_log_save = QPushButton("Сохранить")
+        self.btn_log_save.setObjectName("btnGhost")
+        self.btn_log_save.setCursor(Qt.PointingHandCursor)
+        self.btn_log_save.clicked.connect(self.save_logs)
+        self.btn_log_full = QPushButton("Весь журнал")
+        self.btn_log_full.setObjectName("btnGhost")
+        self.btn_log_full.setCursor(Qt.PointingHandCursor)
+        self.btn_log_full.clicked.connect(lambda: self._load_logs_n(10000))
+        lbar2.addWidget(self.log_search, 1)
+        lbar2.addWidget(self.log_level)
+        lbar2.addWidget(self.btn_log_save)
+        lbar2.addWidget(self.btn_log_full)
 
         lw = QFrame()
         lw.setObjectName("logCard")
@@ -664,6 +704,7 @@ class Win(QMainWindow):
         ll.setContentsMargins(14, 12, 14, 14)
         ll.setSpacing(8)
         ll.addLayout(lbar)
+        ll.addLayout(lbar2)
         ll.addWidget(self.logs)
 
         split = QSplitter(Qt.Vertical)
@@ -697,6 +738,7 @@ class Win(QMainWindow):
         seg_wrap.setStyleSheet(SEG_QSS)
         seg_wrap.setLayout(seg)
         head.insertWidget(3, seg_wrap)  # между заголовком и pill со статистикой
+        head.insertWidget(4, self.monitor)
 
         self.files_tab = FilesTab()
         self.backup_tab = BackupTab()
@@ -744,10 +786,13 @@ class Win(QMainWindow):
         self.btn_stop.clicked.connect(lambda: self.act("stop"))
         self.btn_restart.clicked.connect(lambda: self.act("restart"))
         self.table.itemSelectionChanged.connect(self.load_logs)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._bot_menu)
         self.lines.editingFinished.connect(self.load_logs)
 
         self.t_refresh = QTimer(self, interval=5000, timeout=self.refresh)
         self.t_logs = QTimer(self, interval=2000, timeout=self.load_logs)
+        self.t_monitor = QTimer(self, interval=10000, timeout=self.monitor_tick)
         self.live.toggled.connect(lambda on: self.t_logs.start() if on else self.t_logs.stop())
 
         last = self.cfg.get("last")
@@ -889,7 +934,9 @@ class Win(QMainWindow):
                     pass
             self.statusBar().showMessage(f"Подключено: {name}")
             self.t_refresh.start()
+            self.t_monitor.start()
             self.refresh()
+            self.monitor_tick()
             self.files_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
             self.backup_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
             self.deploy_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
@@ -897,6 +944,72 @@ class Win(QMainWindow):
         bg(job, done)
 
     # --- список ботов ---
+    def monitor_tick(self):
+        if not self.ssh.client or self._busy_mon:
+            return
+        self._busy_mon = True
+        cmd = ("cat /proc/loadavg; echo ---; "
+               "free -m | awk '/^Mem:/{print $2, $3}'; echo ---; "
+               "df -m / | awk 'NR==2{print $2, $3}'; echo ---; "
+               "awk -F'[: ]+' '!/lo/&&/:/{r+=$3;t+=$11}END{print r+0, t+0}' /proc/net/dev; echo ---; "
+               "A=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat); sleep 1; "
+               "B=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat); echo \"$A $B\"")
+
+        def done(res, err):
+            self._busy_mon = False
+            if err:
+                return
+            try:
+                self.monitor.setText(self._fmt_monitor(res[1]))
+            except Exception:
+                pass
+
+        bg(lambda: self.ssh.run(cmd), done)
+
+    @staticmethod
+    def _gb(mb: float) -> str:
+        return f"{mb / 1024:.1f}G" if mb >= 1024 else f"{mb:.0f}M"
+
+    def _fmt_monitor(self, out: str) -> str:
+        parts = [s.strip() for s in (out or "").split("---")]
+        while len(parts) < 5:
+            parts.append("")
+        load = (parts[0].split() or ["—"])[0]
+        mem = parts[1].split()
+        disk = parts[2].split()
+        net = parts[3].split()
+        cpu = parts[4].split()
+        cpu_s = "—"
+        try:
+            a_t, a_i, b_t, b_i = float(cpu[0]), float(cpu[1]), float(cpu[2]), float(cpu[3])
+            if b_t > a_t:
+                pct = (1 - (b_i - a_i) / (b_t - a_t)) * 100
+                cpu_s = f"{max(0.0, min(100.0, pct)):.0f}%"
+        except (ValueError, IndexError):
+            pass
+        try:
+            mem_s = f"{self._gb(float(mem[1]))}/{self._gb(float(mem[0]))}"
+        except (ValueError, IndexError):
+            mem_s = "—"
+        try:
+            disk_s = f"{float(disk[1]) / float(disk[0]) * 100:.0f}%" if float(disk[0]) else "—"
+        except (ValueError, IndexError, ZeroDivisionError):
+            disk_s = "—"
+        net_s = "—"
+        try:
+            rx, tx = float(net[0]), float(net[1])
+            now = time.monotonic()
+            if self._net_prev:
+                (prx, ptx, pt) = self._net_prev
+                dt = max(now - pt, 0.001)
+                if rx >= prx and tx >= ptx:
+                    net_s = (f"↓{self._gb((rx - prx) / dt / 1024)}/с "
+                             f"↑{self._gb((tx - ptx) / dt / 1024)}/с")
+            self._net_prev = (rx, tx, now)
+        except (ValueError, IndexError):
+            pass
+        return f"CPU {cpu_s} · RAM {mem_s} · DISK {disk_s} · {net_s} · {load}"
+
     def refresh(self):
         if not self.ssh.client or self.busy:
             return
@@ -906,6 +1019,7 @@ class Win(QMainWindow):
             self.busy = False
             if err:
                 self.t_refresh.stop()
+                self.t_monitor.stop()
                 return self.statusBar().showMessage(f"Связь потеряна: {err}")
             self.rows = rows
             self.render()
@@ -929,8 +1043,15 @@ class Win(QMainWindow):
                 dot = QColor("#8496A8")
             is_dock = r["name"].startswith("🐳 ")
             disp_name = strip_docker_prefix(r["name"])
+            if r["mem"] is None:
+                mem_s = ""
+            elif r.get("mem_total"):
+                used = f'{r["mem"]:.1f}'.rstrip("0").rstrip(".")
+                mem_s = f"{used}/{r['mem_total']:.0f}"
+            else:
+                mem_s = f'{r["mem"]:.1f}'
             vals = ["●", disp_name, r["kind"], f'{r["active"]} ({r["sub"]})', r["pid"] if r["pid"] != "0" else "",
-                    f'{r["mem"]:.1f}' if r["mem"] is not None else "", f'{r["cpu"]:.1f}' if r["cpu"] is not None else "", r["since"]]
+                    mem_s, f'{r["cpu"]:.1f}' if r["cpu"] is not None else "", r["since"]]
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 f = QFont(FONT_UI, 10)
@@ -964,6 +1085,128 @@ class Win(QMainWindow):
         if r < 0 or r >= len(getattr(self, "shown", [])):
             return None
         return self.shown[r]["name"]
+
+    def current_row(self):
+        r = self.table.currentRow()
+        if r < 0 or r >= len(getattr(self, "shown", [])):
+            return None
+        return self.shown[r]
+
+    def _bot_menu(self, pos) -> None:
+        row = self.current_row()
+        if row is None:
+            return
+        m = self._build_bot_menu(row)
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _build_bot_menu(self, row: dict):
+        m = QMenu(self)
+        a_files = m.addAction("Файлы бота")
+        a_files.setEnabled(bool(row.get("dir")))
+        a_files.triggered.connect(lambda: self.open_bot_files(row))
+        a_env = m.addAction("Переменные (.env)")
+        a_env.setEnabled(bool(row.get("dir")))
+        a_env.triggered.connect(lambda: self.open_bot_env(row))
+        a_term = m.addAction("Открыть терминал")
+        a_term.triggered.connect(lambda: self.open_bot_terminal(row))
+        m.addSeparator()
+        a_start = m.addAction("Старт")
+        a_start.triggered.connect(lambda: self.act("start"))
+        a_stop = m.addAction("Стоп")
+        a_stop.triggered.connect(lambda: self.act("stop"))
+        a_restart = m.addAction("Рестарт")
+        a_restart.triggered.connect(lambda: self.act("restart"))
+        return m
+
+    def open_bot_files(self, row: dict) -> None:
+        d = (row or {}).get("dir", "")
+        if not d:
+            return self.statusBar().showMessage("Папка бота неизвестна")
+        self.pages.setCurrentIndex(1)
+        try:
+            self.btn_mode_files.setChecked(True)
+        except Exception:
+            pass
+        self.files_tab.open_remote_dir(d)
+        self.statusBar().showMessage(f"Файлы: {d}")
+
+    def open_bot_env(self, row: dict) -> None:
+        d = (row or {}).get("dir", "")
+        name = strip_docker_prefix((row or {}).get("name", ""))
+        if not d or not self.ssh.client:
+            return self.statusBar().showMessage("Нет папки бота или подключения")
+        remote = d.rstrip("/") + "/.env"
+        self.statusBar().showMessage(f"Читаю {remote}…")
+
+        def done(res, err):
+            if err:
+                return self.statusBar().showMessage(f"Ошибка: {err}")
+            code, o, e = res
+            if code != 0:
+                return self.statusBar().showMessage(f"Нет .env: {e.strip() or remote}")
+            dlg = EnvDialog(self, name, o)
+            if dlg.exec() != EnvDialog.Accepted or not dlg.has_changes():
+                return
+            self._save_bot_env(row, remote, dlg.result_text())
+
+        bg(lambda: self.ssh.run(f"cat {shlex.quote(remote)}", sudo=True), done)
+
+    def _save_bot_env(self, row: dict, remote: str, text: str) -> None:
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        cmd = f"printf %s {b64} | base64 -d > {shlex.quote(remote)} && chmod 600 {shlex.quote(remote)}"
+        self.statusBar().showMessage("Сохраняю .env…")
+
+        def done(res, err):
+            if err:
+                return self.statusBar().showMessage(f"Ошибка: {err}")
+            code, _, e = res
+            if code != 0:
+                return self.statusBar().showMessage(f"Не сохранилось: {e.strip()}")
+            self.statusBar().showMessage(".env сохранён")
+            if QMessageBox.question(self, "Переменные",
+                                    "Перезапустить бота, чтобы применить?") == QMessageBox.Yes:
+                # выбираем ту же строку и жмём рестарт
+                for r in getattr(self, "shown", []):
+                    if r["name"] == row["name"]:
+                        i = self.shown.index(r)
+                        self.table.selectRow(i)
+                        break
+                self.act("restart")
+
+        bg(lambda: self.ssh.run(cmd, sudo=True), done)
+
+    def open_bot_terminal(self, row: dict) -> None:
+        host, user = self.host.text().strip(), self.user.text().strip()
+        try:
+            port = str(int(self.port.text() or 22))
+        except ValueError:
+            port = "22"
+        if not host or not user:
+            return self.statusBar().showMessage("Укажи хост и пользователя")
+        d = (row or {}).get("dir", "")
+        remote = f"cd {shlex.quote(d)} && exec bash -l" if d else "exec bash -l"
+        args = ["ssh", "-t", "-p", port, f"{user}@{host}", remote]
+
+        def clean_env():
+            pe = QProcessEnvironment()
+            for k, v in sanitized_env().items():
+                pe.insert(k, v)
+            return pe
+
+        proc = QProcess()
+        proc.setProcessEnvironment(clean_env())
+        proc.setProgram("wt.exe")
+        proc.setArguments(args)
+        if proc.startDetached():
+            return self.statusBar().showMessage(f"Терминал: {user}@{host}")
+        fb = QProcess()
+        fb.setProcessEnvironment(clean_env())
+        fb.setProgram("cmd")
+        fb.setArguments(["/c", "start", "", "ssh", "-t", "-p", port,
+                         f"{user}@{host}", remote])
+        if fb.startDetached():
+            return self.statusBar().showMessage(f"Терминал: {user}@{host}")
+        self.statusBar().showMessage("Не запустился ни wt.exe, ни ssh")
 
     # --- действия ---
     @staticmethod
@@ -1000,28 +1243,64 @@ class Win(QMainWindow):
             bg(lambda: self.ssh.run(f"systemctl {verb} {shlex.quote(target)}", sudo=True), done)
 
     # --- логи ---
+    ERR_RE = re.compile(r"(?i)(error|fail|exception|traceback|critical|refused|denied|panic)")
+    WARN_RE = re.compile(r"(?i)(warn|error|fail|exception|traceback|critical|refused|denied|panic)")
+
     def load_logs(self):
+        self._load_logs_n(self.lines.value())
+
+    def _load_logs_n(self, n: int):
         name = self.current()
         if not name or not self.ssh.client:
             return
         self.log_name = name
         self.log_title.setText(f"Логи: {strip_docker_prefix(name)}")
-        n = self.lines.value()
 
         def done(res, err):
             if err or name != self.log_name:
                 return
-            bar = self.logs.verticalScrollBar()
-            at_bottom = bar.value() >= bar.maximum() - 4
-            self.logs.setPlainText(res[1] or res[2])
-            if at_bottom or not self.live.isChecked():
-                bar.setValue(bar.maximum())
+            self.log_raw = res[1] or res[2]
+            self._render_logs()
 
         kind, target = self._target(name)
         if kind == "docker":
             bg(lambda: self.docker_exec(f"logs --tail {n}", target), done)
         else:
             bg(lambda: self.ssh.run(f"journalctl -u {shlex.quote(target)} -n {n} --no-pager -o short-iso", sudo=True), done)
+
+    def _render_logs(self) -> None:
+        text = getattr(self, "log_raw", "")
+        lvl = self.log_level.currentIndex() if hasattr(self, "log_level") else 0
+        q = self.log_search.text().strip().lower() if hasattr(self, "log_search") else ""
+        if lvl or q:
+            out = []
+            for line in text.splitlines():
+                if lvl == 1 and not self.ERR_RE.search(line):
+                    continue
+                if lvl == 2 and not self.WARN_RE.search(line):
+                    continue
+                if q and q not in line.lower():
+                    continue
+                out.append(line)
+            text = "\n".join(out)
+        bar = self.logs.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        self.logs.setPlainText(text)
+        if at_bottom or not self.live.isChecked():
+            bar.setValue(bar.maximum())
+
+    def save_logs(self) -> None:
+        name = self.current() or "logs"
+        safe = re.sub(r'[\\/:*?"<>|]', "_", strip_docker_prefix(name))
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить логи", f"{safe}.log",
+                                              "Log files (*.log);;All files (*)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.logs.toPlainText(), encoding="utf-8")
+            self.statusBar().showMessage(f"Логи сохранены: {path}")
+        except OSError as e:
+            self.statusBar().showMessage(f"Не сохранилось: {e}")
 
 
 def main():

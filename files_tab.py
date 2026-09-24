@@ -20,8 +20,9 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import paramiko
-from PySide6.QtCore import QDir, QMimeData, QObject, QProcess, QProcessEnvironment, Qt, QUrl, Signal
+from PySide6.QtCore import QDir, QFileInfo, QMimeData, QObject, QProcess, QProcessEnvironment, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QDrag
+from PySide6.QtWidgets import QFileIconProvider
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
@@ -816,6 +817,8 @@ class FilePane(QFrame):
         st = self.style()
         self._icon_dir = st.standardIcon(QStyle.SP_DirIcon)
         self._icon_file = st.standardIcon(QStyle.SP_FileIcon)
+        self._icon_provider = QFileIconProvider()
+        self._icon_cache: dict = {}
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 14)
@@ -963,6 +966,16 @@ class FilePane(QFrame):
         files = sorted([e for e in items if not e.is_dir], key=key, reverse=self.sort_desc)
         return dirs + files
 
+    def _file_icon(self, name: str):
+        """Настоящая иконка ОС по расширению (py ≠ txt), с кэшем."""
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext not in self._icon_cache:
+            try:
+                self._icon_cache[ext] = self._icon_provider.icon(QFileInfo(name))
+            except Exception:
+                self._icon_cache[ext] = self._icon_file
+        return self._icon_cache[ext]
+
     def _show_dotdot(self) -> bool:
         """Строка '..' — везде, кроме корня (там выше идти некуда)."""
         if self.backend is None:
@@ -1007,7 +1020,7 @@ class FilePane(QFrame):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, {"dotdot": False, "entry": e})
                 if j == 0:
-                    it.setIcon(self._icon_dir if e.is_dir else self._icon_file)
+                    it.setIcon(self._icon_dir if e.is_dir else self._file_icon(e.name))
                 self.table.setItem(i, j, it)
         arrows = {0: " ▲" if not self.sort_desc else " ▼"}.get(self.sort_col, "")
         base = self.COLS_REMOTE if show_mode else self.COLS_LOCAL
@@ -1382,6 +1395,7 @@ class FilesTab(QWidget):
         super().__init__(parent)
         self.setStyleSheet(FILES_QSS)
         self._creds: Optional[dict] = None
+        self._pending_remote = ""
         self._ssh: Optional["paramiko.SSHClient"] = None
         self._sftp = None
         self._connected = False
@@ -1585,10 +1599,23 @@ class FilesTab(QWidget):
             saved = (self._load_state().get("profiles", {}).get(self._profile, {}))
             if saved.get("local"):
                 self.pane_local.go(saved["local"])
-            self.pane_remote.go(saved.get("remote") or remote_be.home())
+            pending, self._pending_remote = self._pending_remote, ""
+            self.pane_remote.go(pending or saved.get("remote") or remote_be.home())
             self.set_status(f"Подключено: {self._profile}")
 
         self._ops.submit(work, done)
+
+    def open_remote_dir(self, path: str) -> None:
+        """Открыть папку на сервере: сразу, если подключено, иначе после коннекта."""
+        if self._connected and self.pane_remote.backend is not None:
+            self._pending_remote = ""
+            self.pane_remote.go(path)
+            return
+        self._pending_remote = path
+        if self._creds:
+            self.activate(force=not self._connected)
+        else:
+            self.set_status("Нет подключения")
 
     def _open_sftp(self):
         with self._conn_lock:

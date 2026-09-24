@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (
 )
 
 from backup_core import (
-    BackupEngine, BackupStore, DaemonRunner, FIND_CMD, new_job, ssh_exec,
-    human_size,
+    BackupEngine, BackupStore, DaemonRunner, DEFAULT_ROOT, FIND_CMD, FIND_PY_CMD, new_job, ssh_exec,
+    human_size, sanitize_name,
 )
 
 __all__ = ["BackupTab"]
@@ -34,7 +34,7 @@ def fmt_last(last: dict) -> str:
 class JobDialog(QDialog):
     """Добавление / редактирование задания."""
 
-    def __init__(self, parent, job: dict, find_fn):
+    def __init__(self, parent, job: dict, find_fn, store_root: str = "", profile: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Задание бэкапа")
         self.setModal(True)
@@ -64,22 +64,50 @@ class JobDialog(QDialog):
         self.c_zip = QCheckBox("Сжимать в zip")
         self.c_zip.setChecked(bool(job.get("compress")))
         self.e_root = QLineEdit(job.get("local_root") or "")
-        self.e_root.setPlaceholderText("по умолчанию — глобальный корень")
+        self.e_root.setPlaceholderText("пусто — глобальный корень")
         self.btn_browse = QPushButton("…")
         self.btn_browse.setObjectName("btnGhost")
         self.btn_browse.setFixedWidth(36)
         self.btn_browse.clicked.connect(self._on_browse)
+        self.btn_unset = QPushButton("Сброс")
+        self.btn_unset.setObjectName("btnGhost")
+        self.btn_unset.setToolTip("Убрать свою папку, использовать глобальный корень")
+        self.btn_unset.setCursor(Qt.PointingHandCursor)
+        self.btn_unset.clicked.connect(lambda: (self.e_root.clear(), self._update_effective()))
         root_row = QHBoxLayout()
         root_row.addWidget(self.e_root, 1)
         root_row.addWidget(self.btn_browse)
+        root_row.addWidget(self.btn_unset)
         root_wrap = QWidget()
         root_wrap.setLayout(root_row)
+        self.lbl_effective = QLabel("")
+        self.lbl_effective.setObjectName("statusLine")
+        self.lbl_effective.setWordWrap(True)
+        self.e_name.textChanged.connect(lambda _t: self._update_effective())
+        self.e_root.textChanged.connect(lambda _t: self._update_effective())
+        self._store_root = store_root
+        self._profile = profile
+        self._update_effective()
         form.addRow("Название:", self.e_name)
         form.addRow("База на сервере:", remote_wrap)
         form.addRow("Тип БД:", self.c_type)
         form.addRow("Хранить копий (0 — все):", self.s_keep)
         form.addRow("", self.c_zip)
         form.addRow("Папка на компьютере:", root_wrap)
+        form.addRow("Итоговая папка:", self.lbl_effective)
+        self.e_code = QPlainTextEdit("\n".join(job.get("code") or []))
+        self.e_code.setPlaceholderText("пути .py на сервере, каждый с новой строки")
+        self.e_code.setMaximumHeight(70)
+        self.btn_find_py = QPushButton("Найти .py…")
+        self.btn_find_py.setObjectName("btnGhost")
+        self.btn_find_py.setCursor(Qt.PointingHandCursor)
+        self.btn_find_py.clicked.connect(self._on_find_py)
+        code_row = QHBoxLayout()
+        code_row.addWidget(self.e_code, 1)
+        code_row.addWidget(self.btn_find_py)
+        code_wrap = QWidget()
+        code_wrap.setLayout(code_row)
+        form.addRow("Резерв кода:", code_wrap)
         lay.addLayout(form)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("Сохранить")
@@ -89,6 +117,15 @@ class JobDialog(QDialog):
         lay.addWidget(box)
         self.setMinimumWidth(460)
 
+    def _update_effective(self) -> None:
+        own = self.e_root.text().strip()
+        if own:
+            self.lbl_effective.setText(f"{own} (своя папка — глобальный корень не действует)")
+        else:
+            base = self._store_root or DEFAULT_ROOT
+            jobdir = f"{base}/{sanitize_name(self._profile)}/{sanitize_name(self.e_name.text() or 'job')}"
+            self.lbl_effective.setText(f"{jobdir} (глобальный корень)")
+
     def _on_browse(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Папка бэкапов задания",
                                              self.e_root.text() or str(Path.home()))
@@ -96,9 +133,18 @@ class JobDialog(QDialog):
             self.e_root.setText(d)
 
     def _on_find(self) -> None:
-        dlg = FindDialog(self, self._find_fn)
+        dlg = FindDialog(self, self._find_fn, kind="db")
         if dlg.exec() == QDialog.Accepted and dlg.selected:
             self.e_remote.setText(dlg.selected)
+
+    def _on_find_py(self) -> None:
+        dlg = FindDialog(self, self._find_fn, kind="py")
+        if dlg.exec() == QDialog.Accepted and dlg.selected:
+            cur = self.e_code.toPlainText().strip()
+            add = [l for l in (cur.splitlines() if cur else [])]
+            if dlg.selected not in add:
+                add.append(dlg.selected)
+            self.e_code.setPlainText("\n".join(add))
 
     def result_job(self, base: dict) -> dict:
         job = dict(base)
@@ -108,17 +154,19 @@ class JobDialog(QDialog):
         job["keep"] = self.s_keep.value()
         job["compress"] = self.c_zip.isChecked()
         job["local_root"] = self.e_root.text().strip()
+        job["code"] = [l.strip() for l in self.e_code.toPlainText().splitlines() if l.strip()]
         return job
 
 
 class FindDialog(QDialog):
-    """'Найти на сервере': список *.db/*.sqlite*. Выбор подставляет путь."""
+    """'Найти на сервере': kind='db' (*.db) или 'py' (*.py). Выбор подставляет путь."""
 
-    def __init__(self, parent, find_fn):
+    def __init__(self, parent, find_fn, kind: str = "db"):
         super().__init__(parent)
-        self.setWindowTitle("Найти базы на сервере")
+        self.setWindowTitle("Найти базы на сервере" if kind == "db" else "Найти .py на сервере")
         self.setModal(True)
         self.selected = ""
+        self._kind = kind
         lay = QVBoxLayout(self)
         self.lst = QListWidget()
         self.lst.addItem("Поиск…")
@@ -127,7 +175,7 @@ class FindDialog(QDialog):
         row = QHBoxLayout()
         self.btn_re = QPushButton("Обновить")
         self.btn_re.setObjectName("btnGhost")
-        self.btn_re.clicked.connect(lambda: find_fn(self._fill))
+        self.btn_re.clicked.connect(lambda: find_fn(self._fill, self._kind))
         row.addWidget(self.btn_re)
         row.addStretch()
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -138,7 +186,7 @@ class FindDialog(QDialog):
         row.addWidget(box)
         lay.addLayout(row)
         self.setMinimumSize(520, 340)
-        find_fn(self._fill)
+        find_fn(self._fill, self._kind)
 
     def _fill(self, paths, err) -> None:
         self.lst.clear()
@@ -178,7 +226,8 @@ class SettingsDialog(QDialog):
         form.addRow("Корень бэкапов:", wrap)
         lay.addLayout(form)
         hint = QLabel("Подсказка: в бэкапах лежат данные пользователей и, возможно, токены. "
-                      "Не кладите корень в папки с автосинхронизацией в облако без необходимости.")
+                      "Не кладите корень в папки с автосинхронизацией в облако без необходимости. "
+                      "Корень действует на задания без своей папки.")
         hint.setWordWrap(True)
         hint.setObjectName("statusLine")
         lay.addWidget(hint)
@@ -343,7 +392,7 @@ class BackupTab(QWidget):
     def add_job(self) -> None:
         if not self._need():
             return
-        dlg = JobDialog(self, new_job(), self._run_find)
+        dlg = JobDialog(self, new_job(), self._run_find, self.store.root(), self._profile)
         if dlg.exec() == QDialog.Accepted:
             job = dlg.result_job(new_job())
             self.store.save_job(self._profile, job)
@@ -354,7 +403,7 @@ class BackupTab(QWidget):
         sel = self._selected()
         if sel is None:
             return self._log("Выберите задание")
-        dlg = JobDialog(self, sel, self._run_find)
+        dlg = JobDialog(self, sel, self._run_find, self.store.root(), self._profile)
         if dlg.exec() == QDialog.Accepted:
             self.store.save_job(self._profile, dlg.result_job(sel))
             self.render()
@@ -371,12 +420,13 @@ class BackupTab(QWidget):
         self.render()
         self._log(f"Задание удалено: {sel.get('name')}")
 
-    def _run_find(self, cb) -> None:
+    def _run_find(self, cb, kind: str = "db") -> None:
         """find на сервере в фоне, результат — в UI-поток."""
         if not self._creds:
             cb([], "Нет подключения")
             return
         creds = dict(self._creds)
+        cmd = FIND_CMD if kind == "db" else FIND_PY_CMD
 
         def work():
             import paramiko
@@ -388,7 +438,7 @@ class BackupTab(QWidget):
                            allow_agent=True, look_for_keys=True)
             try:
                 from backup_core import ssh_exec
-                rc, o, e = ssh_exec(client, FIND_CMD)
+                rc, o, e = ssh_exec(client, cmd)
                 if rc != 0:
                     return [], (e.strip() or f"find: rc={rc}")
                 return [l.strip() for l in o.splitlines() if l.strip()], None

@@ -1079,6 +1079,14 @@ class DeployTab(QWidget):
         lay.addWidget(card4)
         lay.addStretch()
 
+        self._cards = [card1, card2, card3, card4]
+        self.deploy_hint = QLabel("Подключитесь к серверу карточкой выше — "
+                                  "здесь появятся проект, параметры и установка")
+        self.deploy_hint.setWordWrap(True)
+        self.deploy_hint.setObjectName("statusLine")
+        lay.insertWidget(0, self.deploy_hint)
+        self._set_deploy_visible(False)
+
         self.btn_install.clicked.connect(self.start_install)
         self.btn_cancel.clicked.connect(self.engine.cancel)
         self.btn_update.clicked.connect(self.open_update)
@@ -1112,7 +1120,14 @@ class DeployTab(QWidget):
     def on_connected(self, creds: dict) -> None:
         self._creds = dict(creds)
         self._profile = creds.get("profile", "")
+        self._set_deploy_visible(True)
         self._log(f"Профиль: {self._profile}")
+
+    def _set_deploy_visible(self, on: bool) -> None:
+        for c in getattr(self, "_cards", []):
+            c.setVisible(on)
+        if hasattr(self, "deploy_hint"):
+            self.deploy_hint.setVisible(not on)
 
     def _need(self) -> bool:
         if not self._creds:

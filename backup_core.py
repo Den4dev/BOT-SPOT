@@ -9,7 +9,9 @@ import posixpath
 import queue as queue_mod
 import re
 import shlex
+import shutil
 import sqlite3
+import stat as statmod
 import threading
 import time
 import traceback
@@ -26,7 +28,11 @@ __all__ = ["BackupEngine", "BackupStore", "new_job", "sanitize_name", "tmp_tag",
            "build_filename", "rotation_re", "human_size", "friendly",
            "check_integrity", "snapshot_cmd_sqlite_cli", "snapshot_cmd_sqlite_py",
            "has_sqlite_cli", "DUMPERS", "STATE_PATH", "DEFAULT_ROOT", "FIND_CMD",
-           "Cancelled", "DaemonRunner"]
+           "FIND_PY_CMD", "Cancelled", "DaemonRunner"]
+
+FIND_PY_CMD = ("find /opt /root /home /srv -maxdepth 4 -name '*.py' "
+               "-not -path '*/venv/*' -not -path '*/.venv/*' "
+               "2>/dev/null | head -50")
 
 STATE_PATH = Path.home() / ".botmanager_backups.json"
 LOG_PATH = Path.home() / ".botmanager_backups.log"
@@ -182,6 +188,7 @@ class BackupStore:
 def new_job(name: str = "", remote: str = "") -> dict:
     return {"id": f"j{int(time.time() * 1000)}_{next(_uid)}", "name": name, "remote": remote,
             "dbtype": "sqlite", "keep": 30, "compress": False, "local_root": "",
+            "code": [],
             "last": {"time": "", "size": None, "ok": None, "msg": ""}}
 
 
@@ -336,84 +343,52 @@ class BackupEngine(QObject):
     def _one(self, client, store: BackupStore, profile: str, job: dict) -> bool:
         name = job.get("name") or "job"
         remote = (job.get("remote") or "").strip()
+        code_list = [c.strip() for c in (job.get("code") or []) if c.strip()]
         self.sig_log.emit(f"—— {name}: старт ——")
-        if not remote:
-            self._fail(store, profile, job, "Не указан путь к базе на сервере")
+        if not remote and not code_list:
+            self._fail(store, profile, job, "Нечего бэкапить: ни базы, ни кода")
             return False
-        dumper = DUMPERS.get(job.get("dbtype") or "sqlite")
-        if dumper is None:
-            self._fail(store, profile, job, f'Неизвестный тип БД: {job.get("dbtype")}')
-            return False
+        if remote:
+            dumper = DUMPERS.get(job.get("dbtype") or "sqlite")
+            if dumper is None:
+                self._fail(store, profile, job, f'Неизвестный тип БД: {job.get("dbtype")}')
+                return False
         safe = sanitize_name(name)
         root = job.get("local_root") or store.root()
         job_dir = Path(root) / sanitize_name(profile) / safe
+        backup_dir = job_dir / "backup"
         try:
-            job_dir.mkdir(parents=True, exist_ok=True)
+            backup_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             self._fail(store, profile, job, f"Нет доступа к папке: {e}")
             return False
+        # переезд со старой схемы (датированные файлы лежали рядом) в backup/
+        self._migrate_history(job_dir, backup_dir, safe)
 
         sftp = None
-        tmp = ""
         try:
             sftp = client.open_sftp()
-            # 1. проверка
-            try:
-                st = sftp.stat(remote)
-                remote_size = st.st_size or 0
-            except OSError:
-                self._fail(store, profile, job, f"Файл не найден: {remote}")
-                return False
-            self.sig_log.emit(f"{name}: файл на сервере есть ({human_size(remote_size)}), делаю снапшот…")
-            # 2. временная копия на сервере
-            rc, o, _e = ssh_exec(client, f"mktemp /tmp/botmgr_{tmp_tag(name)}_XXXXXX")
-            if rc != 0 or not o.strip():
-                self._fail(store, profile, job, "Не создался tmp на сервере")
-                return False
-            tmp = o.strip().splitlines()[0].strip()
-            try:
-                method = dumper(client, remote, tmp)
-                self.sig_log.emit(f"{name}: снапшот через {method}, скачиваю…")
-                tmp_size = sftp.stat(tmp).st_size or 0
-                # 3-5. скачивание, проверка, сжатие (при любой ошибке — зачистить локальное)
-                dest = None
-                part = None
-                try:
-                    dest = build_filename(job_dir, safe, "db")
-                    part = dest.with_name(dest.name + ".part")
-                    self._download(sftp, tmp, part, tmp_size)
-                    if part.stat().st_size != tmp_size:
-                        raise RuntimeError(
-                            f"Размер не сошёлся: скачано {part.stat().st_size}, на сервере {tmp_size}")
-                    os.replace(part, dest)
-                    part = None
-                    # 4. целостность
-                    if not check_integrity(dest):
-                        raise RuntimeError("PRAGMA integrity_check != ok")
-                    final = dest
-                    if job.get("compress"):
-                        final = self._zip_one(dest)
-                        dest = None
-                except Exception:
-                    for p in (part, dest):
-                        try:
-                            if p is not None and p.exists() and p.is_file():
-                                p.unlink()
-                        except OSError:
-                            pass
-                    raise
-                # 7. ротация (только после успеха)
-                self._rotate(job_dir, safe, int(job.get("keep") or 0))
-                self._ok(store, profile, job, final)
-                self.sig_log.emit(f"{name}: ок ({human_size(final.stat().st_size)}) → {final.name}")
-                return True
-            finally:
-                # 6. очистка tmp всегда
-                if tmp:
-                    try:
-                        ssh_exec(client, f"rm -f {shlex.quote(tmp)}")
-                    except Exception:
-                        pass
+            final = None
+            if remote:
+                final = self._backup_db(client, sftp, job, name, remote, safe,
+                                        job_dir, backup_dir)
+            code_note = ""
+            code_bytes = 0
+            if code_list:
+                n_files, code_bytes = self._backup_code(sftp, code_list, job_dir / "code")
+                code_note = f", код: {n_files}"
+                self.sig_log.emit(f"{name}: код скачан ({n_files} файлов)")
+            # ротация истории — только после успеха
+            self._rotate(backup_dir, safe, int(job.get("keep") or 0))
+            size = final.stat().st_size if final else code_bytes
+            msg = (final.name if final else "только код") + code_note
+            job["last"] = {"time": datetime.now().isoformat(timespec="seconds"),
+                           "size": size, "ok": True, "msg": msg}
+            store.save_job(profile, job)
+            self.sig_job_done.emit(job.get("id", ""), True,
+                                   f"ок · {human_size(size)}{code_note}")
+            self.sig_log.emit(f"{name}: ок ({human_size(size)}) → {msg}")
+            return True
         except Cancelled:
             self._fail(store, profile, job, "Отменено", log=True)
             return False
@@ -427,6 +402,136 @@ class BackupEngine(QObject):
                     sftp.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _migrate_history(job_dir: Path, backup_dir: Path, safe: str) -> None:
+        rx = rotation_re(safe)
+        try:
+            for p in job_dir.iterdir():
+                if p.is_file() and rx.match(p.name):
+                    try:
+                        shutil.move(str(p), str(backup_dir / p.name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _backup_db(self, client, sftp, job: dict, name: str, remote: str,
+                   safe: str, job_dir: Path, backup_dir: Path) -> Path:
+        # 1. проверка
+        try:
+            st = sftp.stat(remote)
+            remote_size = st.st_size or 0
+        except OSError:
+            raise FileNotFoundError(f"Файл не найден: {remote}")
+        self.sig_log.emit(f"{name}: файл на сервере есть ({human_size(remote_size)}), делаю снапшот…")
+        # 2. временная копия на сервере
+        rc, o, _e = ssh_exec(client, f"mktemp /tmp/botmgr_{tmp_tag(name)}_XXXXXX")
+        if rc != 0 or not o.strip():
+            raise RuntimeError("Не создался tmp на сервере")
+        tmp = o.strip().splitlines()[0].strip()
+        try:
+            dumper = DUMPERS[job.get("dbtype") or "sqlite"]
+            method = dumper(client, remote, tmp)
+            self.sig_log.emit(f"{name}: снапшот через {method}, скачиваю…")
+            tmp_size = sftp.stat(tmp).st_size or 0
+            # 3-5. скачивание, проверка, сжатие (при ошибке — зачистить локальное)
+            dest = None
+            part = None
+            try:
+                dest = build_filename(backup_dir, safe, "db")
+                part = dest.with_name(dest.name + ".part")
+                self._download(sftp, tmp, part, tmp_size)
+                if part.stat().st_size != tmp_size:
+                    raise RuntimeError(
+                        f"Размер не сошёлся: скачано {part.stat().st_size}, на сервере {tmp_size}")
+                os.replace(part, dest)
+                part = None
+                # 4. целостность
+                if not check_integrity(dest):
+                    raise RuntimeError("PRAGMA integrity_check != ok")
+                # актуальная копия всегда рядом
+                try:
+                    shutil.copyfile(dest, job_dir / f"{safe}.db")
+                except OSError as e:
+                    self.sig_log.emit(f"{name}: latest не записался: {e}")
+                final = dest
+                if job.get("compress"):
+                    final = self._zip_one(dest)
+                    dest = None
+                return final
+            except Exception:
+                for p in (part, dest):
+                    try:
+                        if p is not None and p.exists() and p.is_file():
+                            p.unlink()
+                    except OSError:
+                        pass
+                raise
+        finally:
+            # 6. очистка tmp всегда
+            if tmp:
+                try:
+                    ssh_exec(client, f"rm -f {shlex.quote(tmp)}")
+                except Exception:
+                    pass
+
+    def _backup_code(self, sftp, code_list: list, code_dir: Path):
+        """Резерв кода в code/. Возвращает (файлов, байт)."""
+        code_dir.mkdir(parents=True, exist_ok=True)
+        pairs = []  # (remote, size)
+        for entry in code_list:
+            try:
+                st = sftp.stat(entry)
+            except OSError:
+                raise FileNotFoundError(f"Файл кода не найден: {entry}")
+            mode = st.st_mode or 0
+            if statmod.S_ISDIR(mode):
+                pairs.extend(self._remote_py_files(sftp, entry))
+            else:
+                pairs.append((entry, st.st_size or 0))
+        if not pairs:
+            raise FileNotFoundError("По списку кода ничего не найдено")
+        total = sum(s for _, s in pairs)
+        done = 0
+        for remote, size in pairs:
+            if self._cancel.is_set():
+                raise Cancelled()
+            base = posixpath.basename(remote.rstrip("/")) or "file"
+            dst = code_dir / base
+            i = 2
+            while dst.exists():
+                stem, dot, ext = base.rpartition(".")
+                if not dot or "/" in stem:
+                    stem, ext = base, ""
+                dst = code_dir / f"{stem} ({i}){('.' + ext) if ext else ''}"
+                i += 1
+            part = dst.with_name(dst.name + ".part")
+            self._download(sftp, remote, part, size)
+            os.replace(part, dst)
+            done += size
+            self.sig_log.emit(f"код: {base} ({human_size(size)})")
+        return len(pairs), total
+
+    def _remote_py_files(self, sftp, root: str):
+        out = []
+        stack = [root.rstrip("/") or "/"]
+        while stack:
+            d = stack.pop()
+            try:
+                attrs = sftp.listdir_attr(d)
+            except OSError as e:
+                raise e
+            for a in attrs:
+                full = d.rstrip("/") + "/" + a.filename
+                mode = a.st_mode or 0
+                if statmod.S_ISLNK(mode):
+                    continue
+                elif statmod.S_ISDIR(mode):
+                    stack.append(full)
+                elif a.filename.endswith(".py"):
+                    out.append((full, a.st_size or 0))
+        return out
 
     def _download(self, sftp, remote: str, part: Path, total: int) -> None:
         if part.exists():
@@ -472,13 +577,6 @@ class BackupEngine(QObject):
                     self.sig_log.emit(f"Ротация: удалён {old.name}")
                 except OSError as e:
                     self.sig_log.emit(f"Ротация: не удалился {old.name}: {e}")
-
-    def _ok(self, store: BackupStore, profile: str, job: dict, final: Path) -> None:
-        job["last"] = {"time": datetime.now().isoformat(timespec="seconds"),
-                       "size": final.stat().st_size, "ok": True, "msg": final.name}
-        store.save_job(profile, job)
-        self.sig_job_done.emit(job.get("id", ""), True,
-                               f"ок · {human_size(final.stat().st_size)}")
 
     def _fail(self, store: BackupStore, profile: str, job: dict, msg: str, log: bool = False) -> bool:
         if log:
