@@ -231,6 +231,9 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         hint.setObjectName("statusLine")
         lay.addWidget(hint)
+        self.c_reset = QCheckBox("Убрать свои папки у всех заданий (всё в новый корень)")
+        self.c_reset.setChecked(True)
+        lay.addWidget(self.c_reset)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("Сохранить")
         box.button(QDialogButtonBox.Cancel).setText("Отмена")
@@ -531,4 +534,14 @@ class BackupTab(QWidget):
         dlg = SettingsDialog(self, self.store.root())
         if dlg.exec() == QDialog.Accepted and dlg.e_root.text().strip():
             self.store.set_root(dlg.e_root.text().strip())
-            self._log(f"Корень бэкапов: {self.store.root()}")
+            n = 0
+            if dlg.c_reset.isChecked():
+                for prof, pdata in self.store.data.get("profiles", {}).items():
+                    for job in pdata.get("jobs", []):
+                        if job.get("local_root"):
+                            job["local_root"] = ""
+                            n += 1
+                if n:
+                    self.store.save()
+            self._log(f"Корень бэкапов: {self.store.root()}" +
+                      (f" (свои папки сброшены: {n})" if n else ""))

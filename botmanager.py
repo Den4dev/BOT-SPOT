@@ -18,7 +18,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGraphicsDropShadowEffect,
     QGridLayout, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QMenu, QFileDialog, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
+    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QMenu, QFileDialog, QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QSplitter,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -726,13 +726,18 @@ class Win(QMainWindow):
         seg = QHBoxLayout()
         seg.setSpacing(0)
         seg_names = ("segLeft", "segMid", "segMid2", "segRight")
-        for i, b in enumerate((self.btn_mode_bots, self.btn_mode_files,
-                               self.btn_mode_backup, self.btn_mode_deploy)):
+        seg_btns = (self.btn_mode_bots, self.btn_mode_files,
+                    self.btn_mode_backup, self.btn_mode_deploy)
+        for i, b in enumerate(seg_btns):
             b.setCheckable(True)
             b.setObjectName(seg_names[i])
             b.setCursor(Qt.PointingHandCursor)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             mode_group.addButton(b, i)
-            seg.addWidget(b)
+            seg.addWidget(b, 1)
+        seg_wide = max(b.sizeHint().width() for b in seg_btns)
+        for b in seg_btns:
+            b.setMinimumWidth(seg_wide)
         self.btn_mode_bots.setChecked(True)
         seg_wrap = QWidget()
         seg_wrap.setStyleSheet(SEG_QSS)

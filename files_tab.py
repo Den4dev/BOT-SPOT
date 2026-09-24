@@ -59,7 +59,10 @@ QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, 
 QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
     background: #168AF5;
     color: #FFFFFF;
+    border: 1px solid #48AEFF;
+    font-weight: 800;
 }
+QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked { border-right: none; }
 """
 
 FILES_QSS = """
