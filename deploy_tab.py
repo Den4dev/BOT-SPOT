@@ -357,9 +357,9 @@ class DeployEngine(QObject):
                                    created_dir, created_unit, p)
             if p.get("has_requirements"):
                 self.sig_log.emit("Ставлю зависимости из requirements.txt…")
-                rc, _o, e = self._pip(client, f"{vd}/.venv/bin/pip install -r {shlex.quote(vd + '/requirements.txt')}")
+                rc, o_r, e_r = self._pip(client, f"{vd}/.venv/bin/pip install -r {shlex.quote(vd + '/requirements.txt')}")
                 if rc != 0:
-                    tail = self._tail(e)
+                    tail = self._tail((o_r or "") + "\n" + (e_r or ""))
                     hint = ""
                     if "Python.h" in tail or "gcc" in tail.lower():
                         hint = " Подсказка: нужны build-essential и python3-dev (ставятся только с вашего согласия)."
