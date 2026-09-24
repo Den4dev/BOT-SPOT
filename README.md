@@ -35,7 +35,3 @@ python -m PyInstaller --noconfirm bot-spot.spec   # сборка exe -> dist/bot
 | `backup_tab.py`, `backup_core.py` | задания и движок бэкапов |
 | `env_editor.py` | редактор `.env` бота |
 | `bot-spot.spec` | конфигурация PyInstaller |
-
-## Лицензия
-
-MIT (или укажи свою).
