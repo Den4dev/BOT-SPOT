@@ -48,43 +48,46 @@ if not _log.handlers:
 # ---------- стили (живут здесь, THEME_QSS не трогаем) ----------
 SEG_QSS = """
 QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRight {
-    background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A;
+    background: #12304D; color: #D5E3F0; border: 1px solid #235074;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
 QPushButton#segLeft { border-top-left-radius: 10px; border-bottom-left-radius: 10px; border-right: none; }
 QPushButton#segMid, QPushButton#segMid2 { border-radius: 0; border-right: none; }
 QPushButton#segRight { border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
-QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #3D3D3D; }
+QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #1A4066; }
 QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
-    background: #484848;
+    background: #168AF5;
     color: #FFFFFF;
 }
 """
 
 FILES_QSS = """
-QFrame#banner { background: #2B2B2B; border: 1px solid #4A4A4A; border-radius: 10px; }
-QFrame#bannerErr { background: #2B2B2B; border: 1px solid #6A6A6A; border-radius: 10px; }
-QLabel#bannerText { color: #E0E0E0; font-weight: 600; }
-QFrame#bannerErr QLabel#bannerText { color: #FFFFFF; }
-QLabel#statusLine { color: #9D9D9D; font-size: 11px; }
-QLabel#paneTitle { font-size: 13px; font-weight: 700; color: #FFFFFF; }
+QFrame#banner { background: #102B45; border: 1px solid #234A6B; border-radius: 10px; }
+QFrame#bannerErr { background: #102B45; border: 1px solid #8A3038; border-radius: 10px; }
+QLabel#bannerText { color: #D6E2ED; font-weight: 600; }
+QFrame#bannerErr QLabel#bannerText { color: #F1F6FC; }
+QLabel#statusLine { color: #B6CCE0; font-size: 11px; }
+QLabel#paneTitle { font-size: 13px; font-weight: 700; color: #F1F6FC; }
 QTableWidget#fileTable {
-    background: #262626; alternate-background-color: #292929;
-    color: #FFFFFF; gridline-color: #262626; border: 1px solid #3A3A3A; border-radius: 10px;
+    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
+    color: #F1F6FC; gridline-color: #0C2942; border: 1px solid #245679; border-radius: 10px;
 }
 QTableWidget#fileTable::item { padding: 4px 6px; border: none; }
-QTableWidget#fileTable::item:selected { background: #383838; color: #FFFFFF; }
+QTableWidget#fileTable::item:hover { background: #123A5C; }
+QTableWidget#fileTable::item:selected { background: #154C77; color: #FFFFFF; }
 QTableWidget#queueTable {
-    background: #262626; color: #FFFFFF; gridline-color: #262626;
-    border: 1px solid #3A3A3A; border-radius: 10px;
+    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
+    color: #F1F6FC; gridline-color: #0C2942;
+    border: 1px solid #245679; border-radius: 10px;
 }
 QTableWidget#queueTable::item { padding: 3px 6px; border: none; }
+QTableWidget#queueTable::item:selected { background: #154C77; color: #FFFFFF; }
 QProgressBar {
-    background: #202020; border: 1px solid #3A3A3A; border-radius: 6px;
-    text-align: center; color: #D0D0D0; font-size: 10px; height: 14px;
+    background: #0A2036; border: 1px solid #214968; border-radius: 6px;
+    text-align: center; color: #D6E2ED; font-size: 10px; height: 14px;
 }
 QProgressBar::chunk {
-    background: #6A6A6A;
+    background: #168AF5;
     border-radius: 5px;
 }
 """
@@ -859,6 +862,7 @@ class FilePane(QFrame):
 
         self.table = _PaneTable(self)
         self.table.setObjectName("fileTable")
+        self.table.viewport().setAutoFillBackground(False)
         cols = self.COLS_REMOTE if show_mode else self.COLS_LOCAL
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
@@ -1292,6 +1296,7 @@ class QueueWidget(QFrame):
 
         self.table = QTableWidget(0, 6)
         self.table.setObjectName("queueTable")
+        self.table.viewport().setAutoFillBackground(False)
         self.table.setHorizontalHeaderLabels(["Файл", "", "Прогресс", "Скорость", "Статус", ""])
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)

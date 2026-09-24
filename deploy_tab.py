@@ -1401,13 +1401,13 @@ class DeployTab(QWidget):
         self.progress.setValue(100 if ok else 0)
         if status == "running":
             self.lbl_status.setText("Бот работает")
-            self.lbl_status.setStyleSheet("color: #34D399;")
+            self.lbl_status.setStyleSheet("color: #29D17D;")
         elif status == "crashing":
             self.lbl_status.setText("Бот падает (рестарты по кругу)")
-            self.lbl_status.setStyleSheet("color: #F87171;")
+            self.lbl_status.setStyleSheet("color: #FF4D59;")
         elif status == "failed":
             self.lbl_status.setText("Не получилось — смотри журнал")
-            self.lbl_status.setStyleSheet("color: #F87171;")
+            self.lbl_status.setStyleSheet("color: #FF4D59;")
         elif status == "deleted":
             self.lbl_status.setText("Бот удалён")
             self.lbl_status.setStyleSheet("")

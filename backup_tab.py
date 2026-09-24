@@ -324,8 +324,8 @@ class BackupTab(QWidget):
                     it.setFont(f)
                 if c == 3:
                     ok = last.get("ok")
-                    it.setForeground(QColor("#34D399") if ok is True
-                                     else QColor("#F87171") if ok is False else QColor("#8B93A7"))
+                    it.setForeground(QColor("#29D17D") if ok is True
+                                     else QColor("#FF4D59") if ok is False else QColor("#8496A8"))
                 self.table.setItem(i, c, it)
 
     @staticmethod

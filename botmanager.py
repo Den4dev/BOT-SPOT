@@ -9,10 +9,13 @@ from pathlib import Path, PurePosixPath
 
 import paramiko
 from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter,
+                           QPainterPath, QPixmap, QRadialGradient, QSyntaxHighlighter,
+                           QTextCharFormat)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGraphicsDropShadowEffect,
+    QGridLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -86,79 +89,178 @@ def strip_docker_prefix(name: str) -> str:
     return name[2:].strip() if name.startswith("🐳 ") else name
 
 
+class GradientRoot(QWidget):
+    """Фон окна (п.3 ТЗ): линейный градиент 135° + мягкое радиальное свечение."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("root")
+
+    def paintEvent(self, ev) -> None:
+        p = QPainter(self)
+        p.setPen(Qt.NoPen)
+        r = self.rect()
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0.0, QColor("#091A2E"))
+        g.setColorAt(0.55, QColor("#0B2138"))
+        g.setColorAt(1.0, QColor("#072642"))
+        p.fillRect(r, g)
+        rad = max(r.width(), r.height()) * 0.45
+        rg = QRadialGradient(r.width() * 0.65, r.height() * 0.35, rad)
+        rg.setColorAt(0.0, QColor(26, 104, 163, 51))
+        rg.setColorAt(1.0, QColor(26, 104, 163, 0))
+        p.fillRect(r, rg)
+        p.end()
+
+
+class GradientPanel(QFrame):
+    """Карточка области таблицы ботов: свой градиент + свечение справа + рамка."""
+
+    R = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("gradCard")
+
+    def paintEvent(self, ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.rect()
+        path = QPainterPath()
+        path.addRoundedRect(r.adjusted(0, 0, -1, -1), self.R, self.R)
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0.0, QColor("#091E34"))
+        g.setColorAt(0.5, QColor("#0C2945"))
+        g.setColorAt(1.0, QColor("#0A2038"))
+        p.fillPath(path, g)
+        p.save()
+        p.setClipPath(path)
+        rad = max(r.width(), r.height()) * 0.55
+        rg = QRadialGradient(r.width() * 0.70, r.height() * 0.40, rad)
+        rg.setColorAt(0.0, QColor(31, 105, 163, 46))
+        rg.setColorAt(1.0, QColor(31, 105, 163, 0))
+        p.fillRect(r, rg)
+        p.restore()
+        p.setPen(QColor("#245679"))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.end()
+
+
+class LogHighlighter(QSyntaxHighlighter):
+    """Цвет только на токене уровня (п.4 ТЗ), остальная строка нейтральная."""
+
+    LEVELS = {"INFO": "#6FB6E8", "SUCCESS": "#35D58A", "WARNING": "#FFCA45",
+              "ERROR": "#FF5965", "DEBUG": "#8A9BAC"}
+
+    def __init__(self, doc):
+        super().__init__(doc)
+        self._formats = {}
+        for level, color in self.LEVELS.items():
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color))
+            fmt.setFontWeight(QFont.Bold)
+            self._formats[level] = fmt
+        self._rx = re.compile(r"\blevel\s*=\s*(INFO|SUCCESS|WARNING|ERROR|DEBUG)\b"
+                              r"|\b(INFO|SUCCESS|WARNING|ERROR|DEBUG|Traceback)\b")
+
+    def highlightBlock(self, text: str) -> None:
+        for m in self._rx.finditer(text):
+            level = m.group(1) or m.group(2)
+            key = "ERROR" if level == "Traceback" else level
+            self.setFormat(m.start(), m.end() - m.start(), self._formats[key])
+
+
 THEME_QSS = """
 * { outline: none; }
-QMainWindow, QWidget#root { background: #202020; }
-QLabel { color: #FFFFFF; }
-QLabel#title { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: #FFFFFF; }
-QLabel#subtitle { color: #9D9D9D; font-size: 11px; }
-QLabel#h2 { font-size: 13px; font-weight: 700; color: #FFFFFF; }
+QMainWindow { background: #081726; }
+QWidget#root { background: transparent; }
+QFrame#topbar { background: #081726; border: none; border-bottom: 1px solid #1A3A59; border-radius: 0; }
+QLabel { color: #F1F6FC; }
+QLabel#title { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: #F1F6FC; }
+QLabel#subtitle { color: #839AAF; font-size: 11px; }
+QLabel#h2 { font-size: 13px; font-weight: 700; color: #F1F6FC; }
 QLabel#statsPill {
-    background: #2B2B2B; color: #E0E0E0;
-    border: 1px solid #3A3A3A; border-radius: 10px; padding: 6px 12px; font-weight: 600;
+    background: #102B45; color: #D6E2ED;
+    border: 1px solid #234A6B; border-radius: 10px; padding: 6px 12px; font-weight: 600;
 }
 QFrame#card {
-    background: #2B2B2B; border: 1px solid #3A3A3A; border-radius: 10px;
+    background: #0D2943; border: 1px solid #245679; border-radius: 12px;
+}
+QFrame#glassCard {
+    background: rgba(20, 65, 100, 140); border: 1px solid #26587E; border-radius: 12px;
+}
+QFrame#gradCard { background: transparent; border: none; }
+QFrame#logCard {
+    background: #071A2D; border: 1px solid #214D6D; border-radius: 12px;
 }
 QLineEdit, QComboBox, QSpinBox {
-    background: #202020; color: #FFFFFF; border: 1px solid #3A3A3A;
-    border-radius: 8px; padding: 7px 11px; selection-background-color: #5A5A5A;
+    background: #0A2036; color: #E9F3FC; border: 1px solid #214968;
+    border-radius: 8px; padding: 7px 11px; selection-background-color: #168AF5;
 }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #9D9D9D; }
-QLineEdit::placeholder { color: #9D9D9D; }
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border: 1px solid #2877AA; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #1593FF; }
+QLineEdit::placeholder { color: #71899E; }
 QComboBox QAbstractItemView {
-    background: #2B2B2B; color: #FFFFFF; border: 1px solid #3A3A3A;
-    selection-background-color: #5A5A5A; outline: none;
+    background: #0D2943; color: #F1F6FC; border: 1px solid #245679;
+    selection-background-color: #168AF5; outline: none;
 }
 QPushButton {
     border: 1px solid transparent; border-radius: 8px; padding: 9px 18px;
-    font-weight: 700; color: #FFFFFF; background: #3D3D3D;
+    font-weight: 700; color: #FFFFFF; background: #12304D;
 }
-QPushButton:hover { background: #484848; }
-QPushButton:pressed { background: #333333; }
-QPushButton:disabled { color: #6A6A6A; background: #2B2B2B; }
-QPushButton#btnPrimary { background: #3D3D3D; border: 1px solid #565656; }
-QPushButton#btnPrimary:hover { background: #484848; }
-QPushButton#btnSuccess { background: #1F9D55; }
-QPushButton#btnSuccess:hover { background: #25B061; }
-QPushButton#btnDanger { background: #D13438; }
-QPushButton#btnDanger:hover { background: #E04044; }
-QPushButton#btnWarning { background: #E0A100; color: #1A1300; }
-QPushButton#btnWarning:hover { background: #F0B000; }
-QPushButton#btnGhost { background: #333333; color: #E0E0E0; border: 1px solid #4A4A4A; }
-QPushButton#btnGhost:hover { background: #3D3D3D; }
-QCheckBox { color: #E0E0E0; spacing: 7px; }
-QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #6A6A6A; background: #202020; }
-QCheckBox::indicator:checked { background: #CFCFCF; border: 1px solid #CFCFCF; }
+QPushButton:hover { background: #1A4066; }
+QPushButton:pressed { background: #1A4066; }
+QPushButton:disabled { color: #71899E; background: #12304D; }
+QPushButton#btnPrimary { background: #168BF4; border: 1px solid #48AEFF; }
+QPushButton#btnPrimary:hover { background: #249AFF; }
+QPushButton#btnPrimary:pressed { background: #0E70CC; }
+QPushButton#btnSuccess { background: #16B86A; color: #04210F; }
+QPushButton#btnSuccess:hover { background: #20CF7B; color: #04210F; }
+QPushButton#btnDanger { background: #DC2F3C; }
+QPushButton#btnDanger:hover { background: #EF3E4A; }
+QPushButton#btnWarning { background: #F5B514; color: #1A1300; }
+QPushButton#btnWarning:hover { background: #FFC52C; color: #1A1300; }
+QPushButton#btnGhost { background: #102F4A; color: #DDEEFF; border: 1px solid #168AF5; }
+QPushButton#btnGhost:hover { background: #164063; }
+QCheckBox { color: #B6CCE0; spacing: 7px; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #3C617D; background: #102A42; }
+QCheckBox::indicator:checked { background: #168AF5; border: 1px solid #168AF5; }
 QTableWidget {
-    background: #262626; alternate-background-color: #292929;
-    color: #FFFFFF; gridline-color: #262626; border: 1px solid #3A3A3A; border-radius: 10px;
+    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
+    color: #F1F6FC; gridline-color: #0C2942; border: none; border-radius: 0;
 }
 QTableWidget::item { padding: 4px 6px; border: none; }
-QTableWidget::item:selected { background: #383838; color: #FFFFFF; }
+QTableWidget::item:hover { background: #123A5C; }
+QTableWidget::item:selected { background: #154C77; color: #FFFFFF; }
 QHeaderView::section {
-    background: #2F2F2F; color: #9D9D9D; border: none; border-bottom: 1px solid #3A3A3A;
+    background: #123554; color: #B6CCE0; border: none; border-bottom: 1px solid #285B7D;
     padding: 9px 6px; font-weight: 700; font-size: 11px;
 }
 QHeaderView::section:first { border-top-left-radius: 10px; }
 QHeaderView::section:last { border-top-right-radius: 10px; }
-QTableCornerButton::section { background: #2F2F2F; border: none; }
+QTableCornerButton::section { background: #123554; border: none; }
 QPlainTextEdit {
-    background: #1A1A1A; color: #D0D0D0; border: 1px solid #3A3A3A;
-    border-radius: 10px; padding: 8px; selection-background-color: #5A5A5A;
+    background: #061521; color: #7F9AB0; border: 1px solid #214D6D;
+    border-radius: 10px; padding: 8px; selection-background-color: #168AF5;
 }
+QProgressBar {
+    background: #0A2036; border: 1px solid #214968; border-radius: 6px;
+    text-align: center; color: #D6E2ED; font-size: 10px; height: 14px;
+}
+QProgressBar::chunk { background: #168AF5; border-radius: 5px; }
 QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; background: transparent; }
-QStatusBar { background: #1B1B1B; color: #9D9D9D; border-top: 1px solid #3A3A3A; }
+QStatusBar { background: #081726; color: #B6CCE0; border-top: 1px solid #1A3A59; }
 QStatusBar::item { border: none; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 8px; }
 QScrollBar:vertical { background: transparent; width: 11px; margin: 2px; }
-QScrollBar::handle:vertical { background: #4A4A4A; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #6A6A6A; }
+QScrollBar::handle:vertical { background: #245679; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #2C6387; }
 QScrollBar:horizontal { background: transparent; height: 11px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #4A4A4A; border-radius: 5px; min-width: 30px; }
+QScrollBar::handle:horizontal { background: #245679; border-radius: 5px; min-width: 30px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-QToolTip { background: #333333; color: #FFFFFF; border: 1px solid #4A4A4A; padding: 5px; }
+QToolTip { background: #0D2943; color: #F1F6FC; border: 1px solid #245679; padding: 5px; }
 """
 
 
@@ -424,6 +526,7 @@ class Win(QMainWindow):
         self.stats.setObjectName("statsPill")
         head = QHBoxLayout()
         head.setSpacing(12)
+        head.setContentsMargins(14, 10, 14, 10)
         head.addWidget(logo)
         head.addLayout(tcol)
         head.addStretch()
@@ -485,7 +588,7 @@ class Win(QMainWindow):
         conn_grid.setColumnStretch(1, 1)
         conn_grid.setColumnStretch(2, 1)
         conn_card = QFrame()
-        conn_card.setObjectName("card")
+        conn_card.setObjectName("glassCard")
         conn_card.setLayout(conn_grid)
 
         # --- панель действий + таблица ---
@@ -499,7 +602,7 @@ class Win(QMainWindow):
         self.btn_stop.setObjectName("btnDanger")
         self.btn_restart.setObjectName("btnWarning")
         self.btn_refresh.setObjectName("btnGhost")
-        self.btn_start.setIcon(load_icon("play", "#FFFFFF"))
+        self.btn_start.setIcon(load_icon("play", "#04210F"))
         self.btn_stop.setIcon(load_icon("stop", "#FFFFFF"))
         self.btn_restart.setIcon(load_icon("refresh", "#1A1300"))
         self.btn_refresh.setIcon(load_icon("refresh"))
@@ -519,6 +622,7 @@ class Win(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
+        self.table.viewport().setAutoFillBackground(False)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(33)
         h = self.table.horizontalHeader()
@@ -527,8 +631,7 @@ class Win(QMainWindow):
         h.setSectionResizeMode(QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.Stretch)
 
-        tw = QFrame()
-        tw.setObjectName("card")
+        tw = GradientPanel()
         tl = QVBoxLayout(tw)
         tl.setContentsMargins(14, 14, 14, 14)
         tl.setSpacing(10)
@@ -541,6 +644,7 @@ class Win(QMainWindow):
         self.logs.setFont(QFont(FONT_MONO, 10))
         self.logs.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.logs.setPlaceholderText("Выбери бота сверху — здесь появятся его логи (journalctl)…")
+        self._log_hl = LogHighlighter(self.logs.document())
         self.lines = QSpinBox()
         self.lines.setRange(20, 5000)
         self.lines.setValue(200)
@@ -558,7 +662,7 @@ class Win(QMainWindow):
         lbar.addWidget(self.live)
 
         lw = QFrame()
-        lw.setObjectName("card")
+        lw.setObjectName("logCard")
         ll = QVBoxLayout(lw)
         ll.setContentsMargins(14, 12, 14, 14)
         ll.setSpacing(8)
@@ -570,10 +674,9 @@ class Win(QMainWindow):
         split.addWidget(lw)
         split.setSizes([400, 300])
 
-        root = QWidget()
-        root.setObjectName("root")
+        root = GradientRoot()
         rl = QVBoxLayout(root)
-        rl.setContentsMargins(14, 12, 14, 12)
+        rl.setContentsMargins(0, 0, 0, 12)
         rl.setSpacing(12)
         # --- переключатель режимов (Боты / Файлы / Бэкапы / Деплой) ---
         self.btn_mode_bots = QPushButton("Боты")
@@ -606,14 +709,33 @@ class Win(QMainWindow):
         self.pages.addWidget(self.files_tab)  # 1 — Файлы
         self.pages.addWidget(self.backup_tab)  # 2 — Бэкапы
         self.pages.addWidget(self.deploy_tab)  # 3 — Деплой
+        self._seg_buttons = (self.btn_mode_bots, self.btn_mode_files,
+                               self.btn_mode_backup, self.btn_mode_deploy)
+        self._move_seg_glow(0)
+        mode_group.idClicked.connect(self._move_seg_glow)
         mode_group.idClicked.connect(self.pages.setCurrentIndex)
         mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
         self.deploy_tab.open_bots_requested.connect(lambda: self.pages.setCurrentIndex(0))
 
-        rl.addLayout(head)
-        rl.addWidget(conn_card)
-        rl.addWidget(self.pages, 1)
+        topbar = QFrame()
+        topbar.setObjectName("topbar")
+        topbar.setLayout(head)
+        mid = QWidget()
+        mid.setStyleSheet("background: transparent;")
+        midlay = QVBoxLayout(mid)
+        midlay.setContentsMargins(14, 0, 14, 0)
+        midlay.setSpacing(12)
+        midlay.addWidget(conn_card)
+        midlay.addWidget(self.pages, 1)
+        rl.addWidget(topbar)
+        rl.addWidget(mid, 1)
         self.setCentralWidget(root)
+
+        conn_glow = QGraphicsDropShadowEffect(self)
+        conn_glow.setBlurRadius(18)
+        conn_glow.setOffset(0)
+        conn_glow.setColor(QColor(20, 145, 255, 64))
+        self.btn_conn.setGraphicsEffect(conn_glow)
 
         self.btn_conn.clicked.connect(self.connect_ssh)
         self.pw.returnPressed.connect(self.connect_ssh)
@@ -638,6 +760,21 @@ class Win(QMainWindow):
         self._update_prof_buttons()
 
     # --- подключение ---
+    def _move_seg_glow(self, i: int) -> None:
+        """Свечение — только на активной кнопке переключателя (п.4 ТЗ).
+
+        Эффект каждый раз новый: Qt удаляет старый при setGraphicsEffect(None),
+        переиспользовать один инстанс нельзя.
+        """
+        for b in self._seg_buttons:
+            b.setGraphicsEffect(None)
+        if 0 <= i < len(self._seg_buttons):
+            eff = QGraphicsDropShadowEffect(self._seg_buttons[i])
+            eff.setBlurRadius(18)
+            eff.setOffset(0)
+            eff.setColor(QColor(20, 139, 244, 46))
+            self._seg_buttons[i].setGraphicsEffect(eff)
+
     def _update_prof_buttons(self):
         is_real = self.prof.currentText() in self.cfg["profiles"]
         self.btn_rename.setEnabled(is_real)
@@ -783,17 +920,17 @@ class Win(QMainWindow):
         sel = self.current()
         rows = [r for r in self.rows if not self.only_tg.isChecked() or r["kind"] == "Telegram"]
         docker_icon = load_icon("docker")
-        kind_fg, kind_bg = QColor("#E0E0E0"), QColor(255, 255, 255, 14)
-        status_tx = QColor("#E0E0E0")
+        kind_fg, kind_bg = QColor("#B6CCE0"), QColor(255, 255, 255, 14)
+        status_tx = QColor("#F1F6FC")
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             if r["active"] == "active":
-                dot = QColor("#34D399")
+                dot = QColor("#29D17D")
             elif r["active"] == "failed":
-                dot = QColor("#F87171")
+                dot = QColor("#FF4D59")
             else:
-                dot = QColor("#8B93A7")
+                dot = QColor("#8496A8")
             is_dock = r["name"].startswith("🐳 ")
             disp_name = strip_docker_prefix(r["name"])
             vals = ["●", disp_name, r["kind"], f'{r["active"]} ({r["sub"]})', r["pid"] if r["pid"] != "0" else "",
