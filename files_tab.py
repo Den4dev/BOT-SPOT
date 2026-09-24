@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-__all__ = ["FilesTab", "SEG_QSS"]
+from ui_anim import AnimatedButton, derived, on_color
+
+__all__ = ["FilesTab", "build_seg_qss", "build_files_qss", "sanitized_env"]
 
 STATE_PATH = Path.home() / ".botmanager_files.json"
 LOG_PATH = Path.home() / ".botmanager_files.log"
@@ -46,54 +48,59 @@ if not _log.handlers:
         logging.basicConfig(level=logging.INFO)
 
 
-# ---------- стили (живут здесь, THEME_QSS не трогаем) ----------
-SEG_QSS = """
-QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRight {
-    background: #12304D; color: #D5E3F0; border: 1px solid #235074;
+# ---------- стили (на токенах темы) ----------
+def build_seg_qss(d: dict) -> str:
+    base = d["btn"]
+    hover = d["btn_hover"]
+    return f"""
+QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRight {{
+    background: {base}; color: {d['tx']}; border: 1px solid {d['ln_solid']};
     padding: 7px 22px; font-weight: 700; font-size: 12px;
-}
-QPushButton#segLeft { border-radius: 0; border-top-left-radius: 6px; border-bottom-left-radius: 6px; border-right: none; }
-QPushButton#segMid, QPushButton#segMid2 { border-radius: 0; border-right: none; }
-QPushButton#segRight { border-radius: 0; border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
-QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #1A4066; }
-QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
-    background: #168AF5;
-    color: #FFFFFF;
-    border: 1px solid #48AEFF;
+}}
+QPushButton#segLeft {{ border-radius: 0; border-top-left-radius: {d['rs']}px; border-bottom-left-radius: {d['rs']}px; border-right: none; }}
+QPushButton#segMid, QPushButton#segMid2 {{ border-radius: 0; border-right: none; }}
+QPushButton#segRight {{ border-radius: 0; border-top-right-radius: {d['rs']}px; border-bottom-right-radius: {d['rs']}px; }}
+QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover {{ background: {hover}; }}
+QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {{
+    background: transparent;
+    color: {on_color(d['ac'])};
+    border: 1px solid transparent;
     font-weight: 800;
-}
-QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked { border-right: none; }
+}}
+QWidget#segIndicator {{ background: {d['ac']}; border-radius: {d['rs']}px; }}
 """
 
-FILES_QSS = """
-QFrame#banner { background: #102B45; border: 1px solid #234A6B; border-radius: 10px; }
-QFrame#bannerErr { background: #102B45; border: 1px solid #8A3038; border-radius: 10px; }
-QLabel#bannerText { color: #D6E2ED; font-weight: 600; }
-QFrame#bannerErr QLabel#bannerText { color: #F1F6FC; }
-QLabel#statusLine { color: #B6CCE0; font-size: 11px; }
-QLabel#paneTitle { font-size: 13px; font-weight: 700; color: #F1F6FC; }
-QTableWidget#fileTable {
-    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
-    color: #F1F6FC; gridline-color: #0C2942; border: 1px solid #245679; border-radius: 10px;
-}
-QTableWidget#fileTable::item { padding: 4px 6px; border: none; }
-QTableWidget#fileTable::item:hover { background: #123A5C; }
-QTableWidget#fileTable::item:selected { background: #154C77; color: #FFFFFF; }
-QTableWidget#queueTable {
-    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
-    color: #F1F6FC; gridline-color: #0C2942;
-    border: 1px solid #245679; border-radius: 10px;
-}
-QTableWidget#queueTable::item { padding: 3px 6px; border: none; }
-QTableWidget#queueTable::item:selected { background: #154C77; color: #FFFFFF; }
-QProgressBar {
-    background: #0A2036; border: 1px solid #214968; border-radius: 6px;
-    text-align: center; color: #D6E2ED; font-size: 10px; height: 14px;
-}
-QProgressBar::chunk {
-    background: #168AF5;
-    border-radius: 5px;
-}
+
+def build_files_qss(d: dict) -> str:
+    return f"""
+QFrame#banner {{ background: {d['banner_bg']}; border: 1px solid {d['banner_border']}; border-radius: {d['rs']}px; }}
+QFrame#bannerErr {{ background: {d['banner_bg']}; border: 1px solid {d['banner_err_border']}; border-radius: {d['rs']}px; }}
+QLabel#bannerText {{ color: {d['tx']}; font-weight: 600; }}
+QFrame#bannerErr QLabel#bannerText {{ color: {d['tx']}; }}
+QLabel#statusLine {{ color: {d['mu']}; font-size: 11px; }}
+QLabel#paneTitle {{ font-size: 13px; font-weight: 700; color: {d['tx']}; }}
+QTableWidget#fileTable {{
+    background: transparent; alternate-background-color: {d['row_alt']};
+    color: {d['tx']}; gridline-color: {d['grid']}; border: 1px solid {d['card_border']}; border-radius: {d['rs']}px;
+}}
+QTableWidget#fileTable::item {{ padding: 4px 6px; border: none; }}
+QTableWidget#fileTable::item:hover {{ background: {d['item_hover']}; }}
+QTableWidget#fileTable::item:selected {{ background: {d['item_sel']}; color: {d['item_sel_fg']}; }}
+QTableWidget#queueTable {{
+    background: transparent; alternate-background-color: {d['row_alt']};
+    color: {d['tx']}; gridline-color: {d['grid']};
+    border: 1px solid {d['card_border']}; border-radius: {d['rs']}px;
+}}
+QTableWidget#queueTable::item {{ padding: 3px 6px; border: none; }}
+QTableWidget#queueTable::item:selected {{ background: {d['item_sel']}; color: {d['item_sel_fg']}; }}
+QProgressBar {{
+    background: {d['inp_bg']}; border: 1px solid {d['inp_border']}; border-radius: {d['rs']}px;
+    text-align: center; color: {d['tx']}; font-size: 10px; height: 14px;
+}}
+QProgressBar::chunk {{
+    background: {d['ac']};
+    border-radius: {max(d['rs'] - 1, 2)}px;
+}}
 """
 
 
@@ -867,14 +874,14 @@ class FilePane(QFrame):
         self.edit_path = QLineEdit()
         self.edit_path.setPlaceholderText("путь…")
         self.edit_path.returnPressed.connect(self._on_path_entered)
-        self.btn_up = QPushButton()
+        self.btn_up = AnimatedButton()
         self.btn_up.setObjectName("btnGhost")
         self.btn_up.setFixedWidth(36)
         self.btn_up.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
         self.btn_up.setToolTip("Вверх")
         self.btn_up.setCursor(Qt.PointingHandCursor)
         self.btn_up.clicked.connect(self.go_parent)
-        self.btn_refresh = QPushButton()
+        self.btn_refresh = AnimatedButton()
         self.btn_refresh.setObjectName("btnGhost")
         self.btn_refresh.setFixedWidth(36)
         self.btn_refresh.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
@@ -883,11 +890,11 @@ class FilePane(QFrame):
         self.btn_refresh.clicked.connect(self.reload)
         self.chk_hidden = QCheckBox("скрытые")
         self.chk_hidden.toggled.connect(self._on_hidden_toggled)
-        self.btn_mkdir = QPushButton("+ Папка")
+        self.btn_mkdir = AnimatedButton("+ Папка")
         self.btn_mkdir.setObjectName("btnGhost")
         self.btn_mkdir.setCursor(Qt.PointingHandCursor)
         self.btn_mkdir.clicked.connect(self.do_mkdir)
-        self.btn_send = QPushButton("Загрузить ↑" if side == "local" else "↓ Скачать")
+        self.btn_send = AnimatedButton("Загрузить ↑" if side == "local" else "↓ Скачать")
         self.btn_send.setObjectName("btnGhost")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.send_selected)
@@ -1337,11 +1344,11 @@ class QueueWidget(QFrame):
         t.setObjectName("paneTitle")
         top.addWidget(t)
         top.addStretch()
-        self.btn_clear = QPushButton("Очистить завершённые")
+        self.btn_clear = AnimatedButton("Очистить завершённые")
         self.btn_clear.setObjectName("btnGhost")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         self.btn_clear.clicked.connect(self.clear_finished.emit)
-        self.btn_cancel_all = QPushButton("Отменить всё")
+        self.btn_cancel_all = AnimatedButton("Отменить всё")
         self.btn_cancel_all.setObjectName("btnGhost")
         self.btn_cancel_all.setCursor(Qt.PointingHandCursor)
         self.btn_cancel_all.clicked.connect(self.cancel_all.emit)
@@ -1435,7 +1442,7 @@ class QueueWidget(QFrame):
 class FilesTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(FILES_QSS)
+        self.setStyleSheet(build_files_qss(derived()))
         self._creds: Optional[dict] = None
         self._pending_remote = ""
         self._ssh: Optional["paramiko.SSHClient"] = None
@@ -1460,7 +1467,7 @@ class FilesTab(QWidget):
         self.banner_text = QLabel("")
         self.banner_text.setObjectName("bannerText")
         self.banner_text.setWordWrap(True)
-        self.btn_reconnect = QPushButton("Переподключить")
+        self.btn_reconnect = AnimatedButton("Переподключить")
         self.btn_reconnect.setObjectName("btnGhost")
         self.btn_reconnect.setCursor(Qt.PointingHandCursor)
         self.btn_reconnect.clicked.connect(lambda: self.activate(force=True))
@@ -1676,10 +1683,19 @@ class FilesTab(QWidget):
             raise paramiko.SSHException("Нет соединения с сервером")
         return ssh.open_sftp()
 
+    # --- тема ---
+    def apply_theme(self) -> None:
+        self.setStyleSheet(build_files_qss(derived()))
+        if getattr(self, "banner", None) is not None and self.banner.isVisible():
+            self.banner.setStyleSheet(build_files_qss(derived()))
+        for b in self.findChildren(QPushButton):
+            if isinstance(b, AnimatedButton):
+                b.retheme()
+
     # --- баннер и статус ---
     def _show_banner(self, text: str, error: bool) -> None:
         self.banner.setObjectName("bannerErr" if error else "banner")
-        self.banner.setStyleSheet(FILES_QSS)  # переприменяем, чтобы подхватился новый objectName
+        self.banner.setStyleSheet(build_files_qss(derived()))  # переприменяем, чтобы подхватился новый objectName
         self.banner_text.setText(text)
         self.btn_reconnect.setVisible(True)
         self.banner.show()

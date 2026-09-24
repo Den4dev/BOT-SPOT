@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QInputDialog, QLineEdit, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
+from ui_anim import derived, AnimatedButton
 
 __all__ = ["EnvDialog", "parse_dotenv", "serialize_env", "is_secret", "quote_value"]
 
@@ -100,13 +101,13 @@ class EnvDialog(QDialog):
         lay.addWidget(self.table, 1)
 
         bar = QHBoxLayout()
-        self.btn_show = QPushButton("Показать/скрыть")
+        self.btn_show = AnimatedButton("Показать/скрыть")
         self.btn_show.setObjectName("btnGhost")
-        self.btn_copy = QPushButton("Копировать")
+        self.btn_copy = AnimatedButton("Копировать")
         self.btn_copy.setObjectName("btnGhost")
-        self.btn_edit = QPushButton("Изменить")
+        self.btn_edit = AnimatedButton("Изменить")
         self.btn_edit.setObjectName("btnGhost")
-        self.btn_add = QPushButton("+ Добавить")
+        self.btn_add = AnimatedButton("+ Добавить")
         self.btn_add.setObjectName("btnGhost")
         for b in (self.btn_show, self.btn_copy, self.btn_edit, self.btn_add):
             b.setCursor(Qt.PointingHandCursor)
@@ -138,7 +139,7 @@ class EnvDialog(QDialog):
         for i, e in enumerate(self._entries):
             ki = QTableWidgetItem(e["key"])
             if e["idx"] in self._edits:
-                ki.setForeground(QColor("#FFC52C"))
+                ki.setForeground(QColor(derived()["wn"]))
             self.table.setItem(i, 0, ki)
             if e["secret"] and e["key"] not in self._revealed:
                 vi = QTableWidgetItem("••••••••")

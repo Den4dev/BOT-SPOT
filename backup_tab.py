@@ -17,6 +17,7 @@ from backup_core import (
     BackupEngine, BackupStore, DaemonRunner, DEFAULT_ROOT, FIND_CMD, FIND_PY_CMD, new_job, ssh_exec,
     human_size, sanitize_name,
 )
+from ui_anim import AnimatedButton, derived
 
 __all__ = ["BackupTab"]
 
@@ -266,22 +267,22 @@ class BackupTab(QWidget):
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
-        self.btn_add = QPushButton("+ Добавить")
+        self.btn_add = AnimatedButton("+ Добавить")
         self.btn_add.setObjectName("btnPrimary")
-        self.btn_edit = QPushButton("Изменить")
+        self.btn_edit = AnimatedButton("Изменить")
         self.btn_edit.setObjectName("btnGhost")
-        self.btn_del = QPushButton("Удалить")
+        self.btn_del = AnimatedButton("Удалить")
         self.btn_del.setObjectName("btnDanger")
-        self.btn_one = QPushButton("Бэкап выбранного")
+        self.btn_one = AnimatedButton("Бэкап выбранного")
         self.btn_one.setObjectName("btnSuccess")
-        self.btn_all = QPushButton("Бэкап всех")
+        self.btn_all = AnimatedButton("Бэкап всех")
         self.btn_all.setObjectName("btnSuccess")
-        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel = AnimatedButton("Отмена")
         self.btn_cancel.setObjectName("btnGhost")
         self.btn_cancel.setEnabled(False)
-        self.btn_folder = QPushButton("Папка")
+        self.btn_folder = AnimatedButton("Папка")
         self.btn_folder.setObjectName("btnGhost")
-        self.btn_settings = QPushButton("Настройки")
+        self.btn_settings = AnimatedButton("Настройки")
         self.btn_settings.setObjectName("btnGhost")
         for b in (self.btn_add, self.btn_edit, self.btn_del, self.btn_one,
                   self.btn_all, self.btn_cancel, self.btn_folder, self.btn_settings):
@@ -351,6 +352,12 @@ class BackupTab(QWidget):
         self.actions_bar.setVisible(on)
         self.actions_hint.setVisible(not on)
 
+    def apply_theme(self) -> None:
+        for b in self.findChildren(QPushButton):
+            if isinstance(b, AnimatedButton):
+                b.retheme()
+        self.render()
+
     def on_connected(self, creds: dict) -> None:
         self._creds = dict(creds)
         self._profile = creds.get("profile", "")
@@ -387,8 +394,9 @@ class BackupTab(QWidget):
                     it.setFont(f)
                 if c == 3:
                     ok = last.get("ok")
-                    it.setForeground(QColor("#29D17D") if ok is True
-                                     else QColor("#FF4D59") if ok is False else QColor("#8496A8"))
+                    d = derived()
+                    it.setForeground(QColor(d["ok"]) if ok is True
+                                     else QColor(d["er"]) if ok is False else QColor(d["mu"]))
                 self.table.setItem(i, c, it)
 
     @staticmethod

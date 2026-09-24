@@ -11,8 +11,8 @@ import time
 from pathlib import Path, PurePosixPath
 
 import paramiko
-from PySide6.QtCore import QByteArray, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter,
+from PySide6.QtCore import QByteArray, QEvent, QObject, QProcess, QProcessEnvironment, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPixmap, QRadialGradient, QSyntaxHighlighter,
                            QTextCharFormat)
 from PySide6.QtSvg import QSvgRenderer
@@ -23,10 +23,14 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from files_tab import FilesTab, SEG_QSS, sanitized_env
+from files_tab import FilesTab, build_seg_qss, sanitized_env
 from backup_tab import BackupTab
 from deploy_tab import DeployTab
 from env_editor import EnvDialog
+from ui_anim import (DEFAULT_THEME, THEMES, THEME_TITLES, AnimatedButton,
+                     alpha, animate_geometry, derived, fade_widget,
+                     flash_last_alert, mix, on_color, register_theme_hook,
+                     set_theme, shade, theme_name, tokens)
 
 try:
     import keyring  # пароль хранится в системном хранилище (Keychain / Credential Manager / Secret Service)
@@ -69,8 +73,10 @@ def app_icon():
 _ICON_CACHE: dict[tuple[str, str, int], QIcon] = {}
 
 
-def load_icon(name: str, color: str = "#E0E0E0", size: int = 16) -> QIcon:
+def load_icon(name: str, color: str = None, size: int = 16) -> QIcon:
     """Монохромная SVG-иконка из icons/ с подстановкой currentColor. Только отображение."""
+    if color is None:
+        color = tokens()["icon"]
     key = (name, color, size)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -104,18 +110,19 @@ class GradientRoot(QWidget):
         self.setObjectName("root")
 
     def paintEvent(self, ev) -> None:
+        d = derived()
         p = QPainter(self)
         p.setPen(Qt.NoPen)
         r = self.rect()
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0.0, QColor("#091A2E"))
-        g.setColorAt(0.55, QColor("#0B2138"))
-        g.setColorAt(1.0, QColor("#072642"))
+        g.setColorAt(0.0, QColor(d["grad1"]))
+        g.setColorAt(0.55, QColor(d["grad2"]))
+        g.setColorAt(1.0, QColor(d["grad3"]))
         p.fillRect(r, g)
         rad = max(r.width(), r.height()) * 0.45
         rg = QRadialGradient(r.width() * 0.65, r.height() * 0.35, rad)
-        rg.setColorAt(0.0, QColor(26, 104, 163, 51))
-        rg.setColorAt(1.0, QColor(26, 104, 163, 0))
+        rg.setColorAt(0.0, QColor(d["glow"]))
+        rg.setColorAt(1.0, QColor(alpha(d["ac"], 0)))
         p.fillRect(r, rg)
         p.end()
 
@@ -123,32 +130,32 @@ class GradientRoot(QWidget):
 class GradientPanel(QFrame):
     """Карточка области таблицы ботов: свой градиент + свечение справа + рамка."""
 
-    R = 12
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("gradCard")
 
     def paintEvent(self, ev) -> None:
+        d = derived()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = self.rect()
+        rad = d["r"] + 2
         path = QPainterPath()
-        path.addRoundedRect(r.adjusted(0, 0, -1, -1), self.R, self.R)
+        path.addRoundedRect(r.adjusted(0, 0, -1, -1), rad, rad)
         g = QLinearGradient(r.topLeft(), r.bottomRight())
-        g.setColorAt(0.0, QColor("#091E34"))
-        g.setColorAt(0.5, QColor("#0C2945"))
-        g.setColorAt(1.0, QColor("#0A2038"))
-        p.fillPath(path, g)
+        g.setColorAt(0.0, QColor(d["panel1"]))
+        g.setColorAt(0.5, QColor(d["panel2"]))
+        g.setColorAt(1.0, QColor(d["panel3"]))
+        p.fillPath(path, QBrush(g))
         p.save()
         p.setClipPath(path)
-        rad = max(r.width(), r.height()) * 0.55
-        rg = QRadialGradient(r.width() * 0.70, r.height() * 0.40, rad)
-        rg.setColorAt(0.0, QColor(31, 105, 163, 46))
-        rg.setColorAt(1.0, QColor(31, 105, 163, 0))
+        rrad = max(r.width(), r.height()) * 0.55
+        rg = QRadialGradient(r.width() * 0.70, r.height() * 0.40, rrad)
+        rg.setColorAt(0.0, QColor(alpha(d["ac"], 46)))
+        rg.setColorAt(1.0, QColor(alpha(d["ac"], 0)))
         p.fillRect(r, rg)
         p.restore()
-        p.setPen(QColor("#245679"))
+        p.setPen(QColor(d["panel_border"]))
         p.setBrush(Qt.NoBrush)
         p.drawPath(path)
         p.end()
@@ -157,19 +164,27 @@ class GradientPanel(QFrame):
 class LogHighlighter(QSyntaxHighlighter):
     """Цвет только на токене уровня (п.4 ТЗ), остальная строка нейтральная."""
 
-    LEVELS = {"INFO": "#6FB6E8", "SUCCESS": "#35D58A", "WARNING": "#FFCA45",
-              "ERROR": "#FF5965", "DEBUG": "#8A9BAC"}
-
     def __init__(self, doc):
         super().__init__(doc)
         self._formats = {}
-        for level, color in self.LEVELS.items():
+        self._build_formats()
+        self._rx = re.compile(r"\blevel\s*=\s*(INFO|SUCCESS|WARNING|ERROR|DEBUG)\b"
+                              r"|\b(INFO|SUCCESS|WARNING|ERROR|DEBUG|Traceback)\b")
+
+    def _build_formats(self):
+        d = derived()
+        levels = {"INFO": d["ac"], "SUCCESS": d["ok"], "WARNING": d["wn"],
+                  "ERROR": d["er"], "DEBUG": d["mu"]}
+        self._formats = {}
+        for level, color in levels.items():
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(color))
             fmt.setFontWeight(QFont.Bold)
             self._formats[level] = fmt
-        self._rx = re.compile(r"\blevel\s*=\s*(INFO|SUCCESS|WARNING|ERROR|DEBUG)\b"
-                              r"|\b(INFO|SUCCESS|WARNING|ERROR|DEBUG|Traceback)\b")
+
+    def retheme(self):
+        self._build_formats()
+        self.rehighlight()
 
     def highlightBlock(self, text: str) -> None:
         for m in self._rx.finditer(text):
@@ -178,94 +193,96 @@ class LogHighlighter(QSyntaxHighlighter):
             self.setFormat(m.start(), m.end() - m.start(), self._formats[key])
 
 
-THEME_QSS = """
-* { outline: none; }
-QMainWindow { background: #081726; }
-QFrame#topbar { background: #081726; border: none; border-bottom: 1px solid #1A3A59; border-radius: 0; }
-QLabel { color: #F1F6FC; }
-QLabel#title { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: #F1F6FC; }
-QLabel#subtitle { color: #839AAF; font-size: 11px; }
-QLabel#h2 { font-size: 13px; font-weight: 700; color: #F1F6FC; }
-QLabel#statsPill {
-    background: #102B45; color: #D6E2ED;
-    border: 1px solid #234A6B; border-radius: 10px; padding: 6px 12px; font-weight: 600;
-}
-QFrame#card {
-    background: #0D2943; border: 1px solid #245679; border-radius: 12px;
-}
-QFrame#glassCard {
-    background: rgba(20, 65, 100, 140); border: 1px solid #26587E; border-radius: 12px;
-}
-QFrame#logCard {
-    background: #071A2D; border: 1px solid #214D6D; border-radius: 12px;
-}
-QLineEdit, QComboBox, QSpinBox {
-    background: #0A2036; color: #E9F3FC; border: 1px solid #214968;
-    border-radius: 8px; padding: 7px 11px; selection-background-color: #168AF5;
-}
-QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border: 1px solid #2877AA; }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #1593FF; }
-QLineEdit::placeholder { color: #71899E; }
-QComboBox QAbstractItemView {
-    background: #0D2943; color: #F1F6FC; border: 1px solid #245679;
-    selection-background-color: #168AF5; outline: none;
-}
-QPushButton {
+def build_qss(d: dict) -> str:
+    """Весь QSS приложения из токенов темы (d = ui_anim.derived())."""
+    return f"""
+* {{ outline: none; }}
+QMainWindow {{ background: {d['pg']}; }}
+QFrame#topbar {{ background: {d['pg']}; border: none; border-bottom: 1px solid {d['ln_solid']}; border-radius: 0; }}
+QLabel {{ color: {d['tx']}; }}
+QLabel#title {{ font-size: 19px; font-weight: 800; letter-spacing: 1px; color: {d['tx']}; }}
+QLabel#subtitle {{ color: {d['mu']}; font-size: 11px; }}
+QLabel#h2 {{ font-size: 13px; font-weight: 700; color: {d['tx']}; }}
+QLabel#statsPill {{
+    background: {mix(d['sf'], d['ac'], 0.10)}; color: {d['tx']};
+    border: 1px solid {d['ln_solid']}; border-radius: {d['rs'] + 4}px; padding: 6px 12px; font-weight: 600;
+}}
+QFrame#card {{
+    background: {d['card']}; border: 1px solid {d['card_border']}; border-radius: {d['r'] + 2}px;
+}}
+QFrame#glassCard {{
+    background: {d['glass']}; border: 1px solid {d['glass_border']}; border-radius: {d['r'] + 2}px;
+}}
+QFrame#logCard {{
+    background: {d['log_bg']}; border: 1px solid {d['card_border']}; border-radius: {d['r'] + 2}px;
+}}
+QLineEdit, QComboBox, QSpinBox {{
+    background: {d['inp_bg']}; color: {d['inp_fg']}; border: 1px solid {d['inp_border']};
+    border-radius: 8px; padding: 7px 11px; selection-background-color: {d['ac']};
+}}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border: 1px solid {mix(d['ac'], d['ln_solid'], 0.5)}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {d['ac']}; }}
+QLineEdit::placeholder {{ color: {d['placeholder']}; }}
+QComboBox QAbstractItemView {{
+    background: {d['sd']}; color: {d['tx']}; border: 1px solid {d['ln_solid']};
+    selection-background-color: {d['item_sel']}; outline: none;
+}}
+QPushButton {{
     border: 1px solid transparent; border-radius: 8px; padding: 9px 18px;
-    font-weight: 700; color: #FFFFFF; background: #12304D;
-}
-QPushButton:hover { background: #1A4066; }
-QPushButton:pressed { background: #1A4066; }
-QPushButton:disabled { color: #71899E; background: #12304D; }
-QPushButton#btnPrimary { background: #168BF4; border: 1px solid #48AEFF; }
-QPushButton#btnPrimary:hover { background: #249AFF; }
-QPushButton#btnPrimary:pressed { background: #0E70CC; }
-QPushButton#btnSuccess { background: #16B86A; color: #04210F; }
-QPushButton#btnSuccess:hover { background: #20CF7B; color: #04210F; }
-QPushButton#btnDanger { background: #DC2F3C; }
-QPushButton#btnDanger:hover { background: #EF3E4A; }
-QPushButton#btnWarning { background: #F5B514; color: #1A1300; }
-QPushButton#btnWarning:hover { background: #FFC52C; color: #1A1300; }
-QPushButton#btnGhost { background: #102F4A; color: #DDEEFF; border: 1px solid #168AF5; }
-QPushButton#btnGhost:hover { background: #164063; }
-QCheckBox { color: #B6CCE0; spacing: 7px; }
-QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #3C617D; background: #102A42; }
-QCheckBox::indicator:checked { background: #168AF5; border: 1px solid #168AF5; }
-QTableWidget {
-    background: transparent; alternate-background-color: rgba(12, 41, 66, 150);
-    color: #F1F6FC; gridline-color: #0C2942; border: none; border-radius: 0;
-}
-QTableWidget::item { padding: 4px 6px; border: none; }
-QTableWidget::item:hover { background: #123A5C; }
-QTableWidget::item:selected { background: #154C77; color: #FFFFFF; }
-QHeaderView::section {
-    background: #123554; color: #B6CCE0; border: none; border-bottom: 1px solid #285B7D;
+    font-weight: 700; color: {d['tx']}; background: {d['btn']};
+}}
+QPushButton:hover {{ background: {d['btn_hover']}; }}
+QPushButton:pressed {{ background: {d['btn_press']}; }}
+QPushButton:disabled {{ color: {d['mu']}; background: {d['btn']}; }}
+QPushButton#btnPrimary {{ background: {d['primary']}; color: {d['primary_fg']}; border: 1px solid {shade(d['ac'], 1.15)}; }}
+QPushButton#btnPrimary:hover {{ background: {d['primary_hover']}; }}
+QPushButton#btnPrimary:pressed {{ background: {d['primary_press']}; }}
+QPushButton#btnSuccess {{ background: {d['success']}; color: {d['success_fg']}; }}
+QPushButton#btnSuccess:hover {{ background: {d['success_hover']}; color: {d['success_fg']}; }}
+QPushButton#btnDanger {{ background: {d['danger']}; color: {d['danger_fg']}; }}
+QPushButton#btnDanger:hover {{ background: {d['danger_hover']}; }}
+QPushButton#btnWarning {{ background: {d['warning']}; color: {d['warning_fg']}; }}
+QPushButton#btnWarning:hover {{ background: {d['warning_hover']}; color: {d['warning_fg']}; }}
+QPushButton#btnGhost {{ background: {d['ghost_bg']}; color: {d['ghost_fg']}; border: 1px solid {d['ghost_border']}; }}
+QPushButton#btnGhost:hover {{ background: {d['ghost_hover']}; }}
+QCheckBox {{ color: {d['tx']}; spacing: 7px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {d['ln_solid']}; background: {d['inp_bg']}; }}
+QCheckBox::indicator:checked {{ background: {d['ac']}; border: 1px solid {d['ac']}; }}
+QTableWidget {{
+    background: transparent; alternate-background-color: {d['row_alt']};
+    color: {d['tx']}; gridline-color: {d['grid']}; border: none; border-radius: 0;
+}}
+QTableWidget::item {{ padding: 4px 6px; border: none; }}
+QTableWidget::item:hover {{ background: {d['item_hover']}; }}
+QTableWidget::item:selected {{ background: {d['item_sel']}; color: {d['item_sel_fg']}; }}
+QHeaderView::section {{
+    background: {d['header_bg']}; color: {d['header_fg']}; border: none; border-bottom: 1px solid {d['header_border']};
     padding: 9px 6px; font-weight: 700; font-size: 11px;
-}
-QHeaderView::section:first { border-top-left-radius: 10px; }
-QHeaderView::section:last { border-top-right-radius: 10px; }
-QTableCornerButton::section { background: #123554; border: none; }
-QPlainTextEdit {
-    background: #061521; color: #7F9AB0; border: 1px solid #214D6D;
-    border-radius: 10px; padding: 8px; selection-background-color: #168AF5;
-}
-QProgressBar {
-    background: #0A2036; border: 1px solid #214968; border-radius: 6px;
-    text-align: center; color: #D6E2ED; font-size: 10px; height: 14px;
-}
-QProgressBar::chunk { background: #168AF5; border-radius: 5px; }
-QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; background: transparent; }
-QStatusBar { background: #081726; color: #B6CCE0; border-top: 1px solid #1A3A59; }
-QStatusBar::item { border: none; }
-QSplitter::handle { background: transparent; }
-QSplitter::handle:vertical { height: 8px; }
-QScrollBar:vertical { background: transparent; width: 11px; margin: 2px; }
-QScrollBar::handle:vertical { background: #245679; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #2C6387; }
-QScrollBar:horizontal { background: transparent; height: 11px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #245679; border-radius: 5px; min-width: 30px; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-QToolTip { background: #0D2943; color: #F1F6FC; border: 1px solid #245679; padding: 5px; }
+}}
+QHeaderView::section:first {{ border-top-left-radius: 10px; }}
+QHeaderView::section:last {{ border-top-right-radius: 10px; }}
+QTableCornerButton::section {{ background: {d['header_bg']}; border: none; }}
+QPlainTextEdit {{
+    background: {d['log_bg']}; color: {d['mu']}; border: 1px solid {d['card_border']};
+    border-radius: 10px; padding: 8px; selection-background-color: {d['ac']};
+}}
+QProgressBar {{
+    background: {d['inp_bg']}; border: 1px solid {d['inp_border']}; border-radius: 6px;
+    text-align: center; color: {d['tx']}; font-size: 10px; height: 14px;
+}}
+QProgressBar::chunk {{ background: {d['ac']}; border-radius: 5px; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 18px; border: none; background: transparent; }}
+QStatusBar {{ background: {d['pg']}; color: {d['mu']}; border-top: 1px solid {d['ln_solid']}; }}
+QStatusBar::item {{ border: none; }}
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:vertical {{ height: 8px; }}
+QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {d['scroll']}; border-radius: 5px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {d['scroll_hover']}; }}
+QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {d['scroll']}; border-radius: 5px; min-width: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QToolTip {{ background: {d['tooltip_bg']}; color: {d['tx']}; border: 1px solid {d['ln_solid']}; padding: 5px; }}
 """
 
 
@@ -590,8 +607,8 @@ class Win(QMainWindow):
         self.prof.addItem("— новое подключение —")
         self.prof.addItems(self.cfg["profiles"].keys())
         self.prof.setMinimumWidth(170)
-        self.btn_rename = QPushButton()
-        self.btn_delete = QPushButton()
+        self.btn_rename = AnimatedButton()
+        self.btn_delete = AnimatedButton()
         for b in (self.btn_rename, self.btn_delete):
             b.setObjectName("btnGhost")
             b.setFixedWidth(40)
@@ -621,7 +638,7 @@ class Win(QMainWindow):
         self.remember = QCheckBox("запомнить")
         self.remember.setChecked(bool(keyring))
         self.remember.setEnabled(bool(keyring))
-        self.btn_conn = QPushButton("Подключиться")
+        self.btn_conn = AnimatedButton("Подключиться")
         self.btn_conn.setObjectName("btnPrimary")
         self.btn_conn.setCursor(Qt.PointingHandCursor)
         self.btn_conn.setIcon(load_icon("plug", "#FFFFFF"))
@@ -646,10 +663,10 @@ class Win(QMainWindow):
         # --- панель действий + таблица ---
         self.only_tg = QCheckBox("Только Telegram-боты")
         self.only_tg.setChecked(True)
-        self.btn_start = QPushButton("Старт")
-        self.btn_stop = QPushButton("Стоп")
-        self.btn_restart = QPushButton("Рестарт")
-        self.btn_refresh = QPushButton("Обновить")
+        self.btn_start = AnimatedButton("Старт")
+        self.btn_stop = AnimatedButton("Стоп")
+        self.btn_restart = AnimatedButton("Рестарт")
+        self.btn_refresh = AnimatedButton("Обновить")
         self.btn_start.setObjectName("btnSuccess")
         self.btn_stop.setObjectName("btnDanger")
         self.btn_restart.setObjectName("btnWarning")
@@ -726,7 +743,7 @@ class Win(QMainWindow):
         self.log_level = QComboBox()
         self.log_level.addItems(["Все строки", "Только ошибки", "Ошибки и предупреждения"])
         self.log_level.currentIndexChanged.connect(lambda _i: self._render_logs())
-        self.btn_log_save = QPushButton("Сохранить")
+        self.btn_log_save = AnimatedButton("Сохранить")
         self.btn_log_save.setObjectName("btnGhost")
         self.btn_log_save.setCursor(Qt.PointingHandCursor)
         self.btn_log_save.clicked.connect(self.save_logs)
@@ -781,10 +798,36 @@ class Win(QMainWindow):
             b.setMinimumWidth(seg_wide)
         self.btn_mode_bots.setChecked(True)
         seg_wrap = QWidget()
-        seg_wrap.setStyleSheet(SEG_QSS)
+        seg_wrap.setObjectName("segWrap")
+        seg_wrap.setStyleSheet(build_seg_qss(derived()))
         seg_wrap.setLayout(seg)
+        # скользящий индикатор активной секции — подложка ПОД кнопками (ТЗ 5.2)
+        self.seg_wrap = seg_wrap
+        self._seg_indicator = QWidget(seg_wrap)
+        self._seg_indicator.setObjectName("segIndicator")
+        self._seg_indicator.lower()
+        seg_wrap.installEventFilter(self)
         head.insertWidget(3, seg_wrap)  # между заголовком и pill со статистикой
         head.insertWidget(4, self.monitor)
+
+        # --- переключатель тем (ТЗ 4): три свотча-превью в правом краю topbar ---
+        self.theme_wrap = QWidget()
+        tw = QHBoxLayout(self.theme_wrap)
+        tw.setContentsMargins(0, 0, 0, 0)
+        tw.setSpacing(6)
+        self.theme_btns = {}
+        for name in THEMES:
+            b = QPushButton()
+            b.setFixedSize(24, 24)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(THEME_TITLES[name])
+            b.clicked.connect(lambda _=False, n=name: self.set_theme(n))
+            tw.addWidget(b)
+            self.theme_btns[name] = b
+        head.insertWidget(5, self.theme_wrap)
+        self._style_theme_swatches()
+        register_theme_hook(self.apply_theme)
 
         self.files_tab = FilesTab()
         self.backup_tab = BackupTab()
@@ -797,9 +840,10 @@ class Win(QMainWindow):
         self._set_server_ui(False)  # без подключения панели действий скрыты (как в «Файлах»)
         self._seg_buttons = (self.btn_mode_bots, self.btn_mode_files,
                                self.btn_mode_backup, self.btn_mode_deploy)
-        self._move_seg_glow(0)
+        QTimer.singleShot(0, lambda: self._move_seg_glow(0, animate=False))
         mode_group.idClicked.connect(self._move_seg_glow)
         mode_group.idClicked.connect(self.pages.setCurrentIndex)
+        self.pages.currentChanged.connect(self._page_crossfade)
         mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
         self.deploy_tab.open_bots_requested.connect(lambda: self.pages.setCurrentIndex(0))
 
@@ -819,8 +863,9 @@ class Win(QMainWindow):
         conn_glow = QGraphicsDropShadowEffect(self)
         conn_glow.setBlurRadius(18)
         conn_glow.setOffset(0)
-        conn_glow.setColor(QColor(20, 145, 255, 64))
+        conn_glow.setColor(QColor(alpha(derived()["ac"], 64)))
         self.btn_conn.setGraphicsEffect(conn_glow)
+        self.conn_glow = conn_glow
 
         self.btn_conn.clicked.connect(self.connect_ssh)
         self.pw.returnPressed.connect(self.connect_ssh)
@@ -868,20 +913,79 @@ class Win(QMainWindow):
         self._set_server_ui(False)
         self.statusBar().showMessage("Связь с сервером потеряна — переподключитесь карточкой выше")
 
-    def _move_seg_glow(self, i: int) -> None:
-        """Свечение — только на активной кнопке переключателя (п.4 ТЗ).
+    def _move_seg_glow(self, i: int, animate: bool = True) -> None:
+        """Индикатор активной секции скользит подложкой под кнопками (ТЗ 5.2)."""
+        if not (0 <= i < len(self._seg_buttons)):
+            return
+        b = self._seg_buttons[i]
+        target = QRect(b.pos(), b.size())
+        if animate and self._seg_indicator.width() > 1:
+            animate_geometry(self._seg_indicator, target, 170)
+        else:
+            self._seg_indicator.setGeometry(target)
 
-        Эффект каждый раз новый: Qt удаляет старый при setGraphicsEffect(None),
-        переиспользовать один инстанс нельзя.
-        """
-        for b in self._seg_buttons:
-            b.setGraphicsEffect(None)
-        if 0 <= i < len(self._seg_buttons):
-            eff = QGraphicsDropShadowEffect(self._seg_buttons[i])
-            eff.setBlurRadius(18)
-            eff.setOffset(0)
-            eff.setColor(QColor(20, 139, 244, 46))
-            self._seg_buttons[i].setGraphicsEffect(eff)
+    def _page_crossfade(self, i: int) -> None:
+        """Короткий crossfade при переключении разделов (ТЗ 5.3)."""
+        w = self.pages.widget(i)
+        if w is not None:
+            fade_widget(w, 0.0, 1.0, 120)
+
+    def eventFilter(self, obj, ev):
+        if obj is getattr(self, "seg_wrap", None) and ev.type() == QEvent.Resize:
+            # при ресайзе окна индикатор просто прилипает к активной кнопке
+            for b in self._seg_buttons:
+                if b.isChecked():
+                    self._seg_indicator.setGeometry(QRect(b.pos(), b.size()))
+                    break
+        return super().eventFilter(obj, ev)
+
+    # --- темы (ТЗ 4-5) ---
+    def set_theme(self, name: str) -> None:
+        if name == theme_name():
+            return
+        set_theme(name)  # вызовет apply_theme через хук
+        self.cfg["theme"] = name
+        self._save_cfg()
+
+    def apply_theme(self) -> None:
+        d = derived()
+        QApplication.instance().setStyleSheet(build_qss(d))
+        self.seg_wrap.setStyleSheet(build_seg_qss(d))
+        self.conn_glow.setColor(QColor(alpha(d["ac"], 64)))
+        self._log_hl.retheme()
+        _ICON_CACHE.clear()  # иконки нейтрального цвета пересоздадутся под новую тему
+        self.files_tab.apply_theme()
+        self.backup_tab.apply_theme()
+        self.deploy_tab.apply_theme()
+        self._retheme_icons()
+        self._style_theme_swatches()
+        self.render()  # перекрасить точки/чипы таблицы ботов
+        self.centralWidget().update()  # GradientRoot рисует фон новыми токенами
+        fade_widget(self.centralWidget(), 0.4, 1.0, 180)
+
+    def _style_theme_swatches(self) -> None:
+        d = derived()
+        cur = theme_name()
+        for name, b in self.theme_btns.items():
+            t = THEMES[name]
+            ring = d["ac"] if name == cur else d["ln_solid"]
+            b.setChecked(name == cur)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 {t['sf']}, stop:1 {t['ac']});
+                    border: 2px solid {ring};
+                    border-radius: 11px;
+                }}
+                QPushButton:hover {{ border: 2px solid {d['ac']}; }}
+            """)
+
+    def _retheme_icons(self) -> None:
+        # нейтральные иконки берут цвет tokens()["icon"]; на цветных кнопках — не трогаем
+        self.btn_rename.setIcon(load_icon("pencil"))
+        self.btn_delete.setIcon(load_icon("trash"))
+        self.btn_refresh.setIcon(load_icon("refresh"))
+        self.log_icon.setPixmap(load_icon("scroll").pixmap(16, 16))
 
     def _update_prof_buttons(self):
         is_real = self.prof.currentText() in self.cfg["profiles"]
@@ -1098,17 +1202,18 @@ class Win(QMainWindow):
         sel = self.current()
         rows = [r for r in self.rows if not self.only_tg.isChecked() or r["kind"] == "Telegram"]
         docker_icon = load_icon("docker")
-        kind_fg, kind_bg = QColor("#B6CCE0"), QColor(255, 255, 255, 14)
-        status_tx = QColor("#F1F6FC")
+        d = derived()
+        kind_fg, kind_bg = QColor(d["mu"]), QColor(alpha(d["tx"], 16))
+        status_tx = QColor(d["tx"])
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             if r["active"] == "active":
-                dot = QColor("#29D17D")
+                dot = QColor(d["ok"])
             elif r["active"] == "failed":
-                dot = QColor("#FF4D59")
+                dot = QColor(d["er"])
             else:
-                dot = QColor("#8496A8")
+                dot = QColor(d["mu"])
             is_dock = r["name"].startswith("🐳 ")
             disp_name = strip_docker_prefix(r["name"])
             if r["mem"] is None:
@@ -1144,6 +1249,11 @@ class Win(QMainWindow):
                 self.table.selectRow(i)
         self.table.blockSignals(False)
         self.shown = rows
+        # лёгкий fade-in при изменении содержимого (не на каждый тик — ТЗ 5.3/5.5)
+        fp = tuple((r["name"], r["active"], r["sub"], r["pid"], r["cpu"], r["mem"]) for r in rows)
+        if getattr(self, "_render_fp", None) is not None and fp != self._render_fp:
+            fade_widget(self.table, 0.55, 1.0, 150)
+        self._render_fp = fp
         n_run = sum(1 for r in rows if r["active"] == "active")
         self.stats.setText(f"{len(rows)} ботов · {n_run} запущено")
         self.statusBar().showMessage(f"Ботов: {len(rows)}, запущено: {n_run}")
@@ -1400,6 +1510,10 @@ class Win(QMainWindow):
         self.logs.setPlainText(text)
         if at_bottom or not self.live.isChecked():
             bar.setValue(bar.maximum())
+        # новая порция логов — короткая подсветка последних WARNING/ERROR (ТЗ 5.3)
+        if text != getattr(self, "_logs_fp", ""):
+            self._logs_fp = text
+            flash_last_alert(self.logs, tokens()["wn"])
 
     def save_logs(self) -> None:
         name = self.current() or "logs"
@@ -1423,7 +1537,11 @@ def main():
     base_font = QFont(FONT_UI, 10)
     base_font.setHintingPreference(QFont.PreferFullHinting)
     app.setFont(base_font)
-    app.setStyleSheet(THEME_QSS)
+    # сохранённая тема применяется до показа окна — без вспышки дефолтной (ТЗ 4)
+    saved_theme = load_cfg().get("theme")
+    if saved_theme in THEMES:
+        set_theme(saved_theme, notify=False)
+    app.setStyleSheet(build_qss(derived()))
     bridge = Bridge()
     bridge.done.connect(lambda cb, res, err: cb(res, err))
     w = Win()

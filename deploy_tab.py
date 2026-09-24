@@ -881,6 +881,7 @@ from PySide6.QtWidgets import (
     QListWidget, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
+from ui_anim import AnimatedButton, derived
 
 __all__ += ["DeployTab"]
 
@@ -1023,7 +1024,7 @@ class DeployTab(QWidget):
         t1.setObjectName("paneTitle")
         c1.addWidget(t1)
         row = QHBoxLayout()
-        self.btn_folder = QPushButton("Выбрать папку…")
+        self.btn_folder = AnimatedButton("Выбрать папку…")
         self.btn_folder.setObjectName("btnGhost")
         self.btn_folder.setCursor(Qt.PointingHandCursor)
         self.btn_folder.clicked.connect(self.choose_folder)
@@ -1057,7 +1058,7 @@ class DeployTab(QWidget):
         self.e_dir.textChanged.connect(lambda _t: setattr(self, "_dir_touched", True))
         self.lbl_py = QLabel("Python на сервере: —")
         self.lbl_py.setObjectName("statusLine")
-        self.btn_check = QPushButton("Проверить сервер")
+        self.btn_check = AnimatedButton("Проверить сервер")
         self.btn_check.setObjectName("btnGhost")
         self.btn_check.setCursor(Qt.PointingHandCursor)
         self.btn_check.clicked.connect(self.check_server)
@@ -1080,14 +1081,14 @@ class DeployTab(QWidget):
         c3.addWidget(t3)
         brow = QHBoxLayout()
         brow.setSpacing(8)
-        self.btn_install = QPushButton("Установить и запустить")
+        self.btn_install = AnimatedButton("Установить и запустить")
         self.btn_install.setObjectName("btnSuccess")
-        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel = AnimatedButton("Отмена")
         self.btn_cancel.setObjectName("btnGhost")
         self.btn_cancel.setEnabled(False)
-        self.btn_update = QPushButton("Обновить бота…")
+        self.btn_update = AnimatedButton("Обновить бота…")
         self.btn_update.setObjectName("btnGhost")
-        self.btn_delete = QPushButton("Удалить бота…")
+        self.btn_delete = AnimatedButton("Удалить бота…")
         self.btn_delete.setObjectName("btnDanger")
         for b in (self.btn_install, self.btn_cancel, self.btn_update, self.btn_delete):
             b.setCursor(Qt.PointingHandCursor)
@@ -1117,11 +1118,11 @@ class DeployTab(QWidget):
         rrow = QHBoxLayout()
         self.lbl_status = QLabel("—")
         self.lbl_status.setObjectName("h2")
-        self.btn_bots = QPushButton("Открыть в Ботах")
+        self.btn_bots = AnimatedButton("Открыть в Ботах")
         self.btn_bots.setObjectName("btnGhost")
         self.btn_bots.setCursor(Qt.PointingHandCursor)
         self.btn_bots.clicked.connect(self.open_bots_requested.emit)
-        self.btn_rmdir = QPushButton("Удалить папку")
+        self.btn_rmdir = AnimatedButton("Удалить папку")
         self.btn_rmdir.setObjectName("btnDanger")
         self.btn_rmdir.setCursor(Qt.PointingHandCursor)
         self.btn_rmdir.clicked.connect(self.remove_created_dir)
@@ -1187,6 +1188,17 @@ class DeployTab(QWidget):
             c.setVisible(on)
         if hasattr(self, "deploy_hint"):
             self.deploy_hint.setVisible(not on)
+
+    def _apply_status_color(self) -> None:
+        d = derived()
+        kind = getattr(self, "_status_kind", None)
+        self.lbl_status.setStyleSheet(f"color: {d[kind]};" if kind in ("ok", "er") else "")
+
+    def apply_theme(self) -> None:
+        for b in self.findChildren(QPushButton):
+            if isinstance(b, AnimatedButton):
+                b.retheme()
+        self._apply_status_color()
 
     def _need(self) -> bool:
         if not self._creds:
@@ -1514,19 +1526,20 @@ class DeployTab(QWidget):
         self.progress.setValue(100 if ok else 0)
         if status == "running":
             self.lbl_status.setText("Бот работает")
-            self.lbl_status.setStyleSheet("color: #29D17D;")
+            self._status_kind = "ok"
         elif status == "crashing":
             self.lbl_status.setText("Бот падает (рестарты по кругу)")
-            self.lbl_status.setStyleSheet("color: #FF4D59;")
+            self._status_kind = "er"
         elif status == "failed":
             self.lbl_status.setText("Не получилось — смотри журнал")
-            self.lbl_status.setStyleSheet("color: #FF4D59;")
+            self._status_kind = "er"
         elif status == "deleted":
             self.lbl_status.setText("Бот удалён")
-            self.lbl_status.setStyleSheet("")
+            self._status_kind = None
         else:
             self.lbl_status.setText(status or "—")
-            self.lbl_status.setStyleSheet("")
+            self._status_kind = None
+        self._apply_status_color()
         logs = (info or {}).get("logs", "")
         if logs:
             self.logs.setPlainText(logs)
