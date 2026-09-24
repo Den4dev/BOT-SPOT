@@ -288,7 +288,13 @@ class BackupTab(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             bar.addWidget(b)
         bar.addStretch()
-        lay.addLayout(bar)
+        self.actions_bar = QWidget()
+        self.actions_bar.setLayout(bar)
+        lay.addWidget(self.actions_bar)
+        self.actions_hint = QLabel("Подключитесь к серверу карточкой выше — панель бэкапов появится после подключения.")
+        self.actions_hint.setWordWrap(True)
+        self.actions_hint.setObjectName("statusLine")
+        lay.addWidget(self.actions_hint)
 
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setObjectName("fileTable")
@@ -341,9 +347,14 @@ class BackupTab(QWidget):
         self.render()
 
     # --- подключение ---
+    def set_actions_visible(self, on: bool) -> None:
+        self.actions_bar.setVisible(on)
+        self.actions_hint.setVisible(not on)
+
     def on_connected(self, creds: dict) -> None:
         self._creds = dict(creds)
         self._profile = creds.get("profile", "")
+        self.set_actions_visible(True)
         self.render()
         self._log(f"Профиль: {self._profile}. Заданий: {len(self._jobs_cache)}")
 

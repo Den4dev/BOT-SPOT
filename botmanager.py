@@ -39,6 +39,9 @@ TG_RE = "aiogram|telebot|telegram|pyrogram|telethon|tgbotapi|telego|telegraf|gra
 SKIP_BIN_PREFIX = ("/usr/bin", "/usr/sbin", "/usr/lib", "/bin", "/sbin", "/lib", "/etc/systemd",
                    "/run", "/proc", "/sys", "/dev", "/var/lib/docker")
 NEW_PROF = "— новое подключение —"
+# локальная пара ключей для беспарольного терминала (wt/ssh подставляет -i)
+BOOT_KEY = Path.home() / ".ssh" / "botspot_term_rsa"
+BOOT_COMMENT = "botspot-terminal"
 FIELDS = "Id,ActiveState,SubState,MainPID,ExecStart,WorkingDirectory,FragmentPath,ActiveEnterTimestamp"
 
 FONT_UI = "Segoe UI Variable"
@@ -296,6 +299,18 @@ class SSH:
         return code, o, e
 
 
+def boot_key_pair():
+    """Локальная пара ключей для терминала: (путь к приватному, строка публичного)."""
+    pub_file = Path(str(BOOT_KEY) + ".pub")
+    if not BOOT_KEY.exists():
+        k = paramiko.RSAKey.generate(2048)
+        BOOT_KEY.parent.mkdir(parents=True, exist_ok=True)
+        k.write_private_key_file(str(BOOT_KEY))
+        pub_file.write_text(f"ssh-rsa {k.get_base64()} {BOOT_COMMENT}\n", encoding="ascii")
+    pub = pub_file.read_text(encoding="ascii").strip()
+    return str(BOOT_KEY), pub
+
+
 def _exec_tokens(d):
     """Токены запуска юнита: сначала argv[] из systemctl show, иначе сам ExecStart."""
     m = re.search(r"argv\[\]=([^;]*)", d.get("ExecStart", ""))
@@ -514,6 +529,7 @@ class Win(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1180, 780)
         self.ssh = SSH()
+        self._term_keys = set()  # user@host:port, куда уже поставили ключ терминала
         self.cfg = load_cfg()
         self.rows = []
         self.busy = False
@@ -631,6 +647,11 @@ class Win(QMainWindow):
             bar.addWidget(w)
         bar.addStretch()
         bar.addWidget(self.only_tg)
+        self.bots_bar = QWidget()
+        self.bots_bar.setLayout(bar)
+        self.bots_hint = QLabel("Подключитесь к серверу карточкой выше — управление ботами появится после подключения.")
+        self.bots_hint.setWordWrap(True)
+        self.bots_hint.setObjectName("statusLine")
 
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
@@ -652,7 +673,8 @@ class Win(QMainWindow):
         tl = QVBoxLayout(tw)
         tl.setContentsMargins(14, 14, 14, 14)
         tl.setSpacing(10)
-        tl.addLayout(bar)
+        tl.addWidget(self.bots_bar)
+        tl.addWidget(self.bots_hint)
         tl.addWidget(self.table)
 
         # --- логи ---
@@ -753,6 +775,7 @@ class Win(QMainWindow):
         self.pages.addWidget(self.files_tab)  # 1 — Файлы
         self.pages.addWidget(self.backup_tab)  # 2 — Бэкапы
         self.pages.addWidget(self.deploy_tab)  # 3 — Деплой
+        self._set_server_ui(False)  # без подключения панели действий скрыты (как в «Файлах»)
         self._seg_buttons = (self.btn_mode_bots, self.btn_mode_files,
                                self.btn_mode_backup, self.btn_mode_deploy)
         self._move_seg_glow(0)
@@ -806,6 +829,26 @@ class Win(QMainWindow):
         self._update_prof_buttons()
 
     # --- подключение ---
+    def _set_server_ui(self, on: bool) -> None:
+        """Панели действий видны только при подключении (п. «как в Файлах»)."""
+        self.bots_bar.setVisible(on)
+        self.bots_hint.setVisible(not on)
+        self.backup_tab.set_actions_visible(on)
+        self.deploy_tab._set_deploy_visible(on)
+
+    def _handle_server_lost(self) -> None:
+        self.t_refresh.stop()
+        self.t_monitor.stop()
+        self.t_logs.stop()
+        c, self.ssh.client = self.ssh.client, None
+        try:
+            if c is not None:
+                c.close()
+        except Exception:
+            pass
+        self._set_server_ui(False)
+        self.statusBar().showMessage("Связь с сервером потеряна — переподключитесь карточкой выше")
+
     def _move_seg_glow(self, i: int) -> None:
         """Свечение — только на активной кнопке переключателя (п.4 ТЗ).
 
@@ -938,6 +981,7 @@ class Win(QMainWindow):
                 except Exception:
                     pass
             self.statusBar().showMessage(f"Подключено: {name}")
+            self._set_server_ui(True)
             self.t_refresh.start()
             self.t_monitor.start()
             self.refresh()
@@ -1023,9 +1067,9 @@ class Win(QMainWindow):
         def done(rows, err):
             self.busy = False
             if err:
-                self.t_refresh.stop()
-                self.t_monitor.stop()
-                return self.statusBar().showMessage(f"Связь потеряна: {err}")
+                self._handle_server_lost()
+                self.statusBar().showMessage(f"Связь потеряна: {err}")
+                return
             self.rows = rows
             self.render()
 
@@ -1181,6 +1225,7 @@ class Win(QMainWindow):
         bg(lambda: self.ssh.run(cmd, sudo=True), done)
 
     def open_bot_terminal(self, row: dict) -> None:
+        """Терминал без пароля: при первом вызове ставим на сервер локальный ключ и ходим с -i."""
         host, user = self.host.text().strip(), self.user.text().strip()
         try:
             port = str(int(self.port.text() or 22))
@@ -1190,7 +1235,7 @@ class Win(QMainWindow):
             return self.statusBar().showMessage("Укажи хост и пользователя")
         d = (row or {}).get("dir", "")
         remote = f"cd {shlex.quote(d)} && exec bash -l" if d else "exec bash -l"
-        args = ["ssh", "-t", "-p", port, f"{user}@{host}", remote]
+        target = f"{user}@{host}:{port}"
 
         def clean_env():
             pe = QProcessEnvironment()
@@ -1198,20 +1243,50 @@ class Win(QMainWindow):
                 pe.insert(k, v)
             return pe
 
-        proc = QProcess()
-        proc.setProcessEnvironment(clean_env())
-        proc.setProgram("wt.exe")
-        proc.setArguments(args)
-        if proc.startDetached():
-            return self.statusBar().showMessage(f"Терминал: {user}@{host}")
-        fb = QProcess()
-        fb.setProcessEnvironment(clean_env())
-        fb.setProgram("cmd")
-        fb.setArguments(["/c", "start", "", "ssh", "-t", "-p", port,
-                         f"{user}@{host}", remote])
-        if fb.startDetached():
-            return self.statusBar().showMessage(f"Терминал: {user}@{host}")
-        self.statusBar().showMessage("Не запустился ни wt.exe, ни ssh")
+        def launch(key_path):
+            args = ["ssh", "-t"]
+            if key_path:
+                args += ["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no"]
+            args += ["-p", port, f"{user}@{host}", remote]
+            proc = QProcess()
+            proc.setProcessEnvironment(clean_env())
+            proc.setProgram("wt.exe")
+            proc.setArguments(args)
+            if proc.startDetached():
+                return self.statusBar().showMessage(f"Терминал: {user}@{host}")
+            fb = QProcess()
+            fb.setProcessEnvironment(clean_env())
+            fb.setProgram("cmd")
+            fb.setArguments(["/c", "start", ""] + args)
+            if fb.startDetached():
+                return self.statusBar().showMessage(f"Терминал: {user}@{host}")
+            self.statusBar().showMessage("Не запустился ни wt.exe, ни ssh")
+
+        if not self.ssh.client:
+            return launch(None)
+        if target in self._term_keys:
+            return launch(str(BOOT_KEY))
+
+        self.statusBar().showMessage("Готовлю беспарольный доступ для терминала…")
+
+        def job():
+            key_path, pub = boot_key_pair()
+            cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+                   f" && grep -qF {shlex.quote(BOOT_COMMENT)} ~/.ssh/authorized_keys"
+                   f" || echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys")
+            code, _, e = self.ssh.run(cmd)
+            if code != 0:
+                raise RuntimeError((e or "").strip() or f"код {code}")
+            return key_path
+
+        def done(key_path, err):
+            if err:
+                self.statusBar().showMessage(f"Ключ терминала не поставился ({err}) — ssh спросит пароль")
+                return launch(None)
+            self._term_keys.add(target)
+            launch(key_path)
+
+        bg(job, done)
 
     # --- действия ---
     @staticmethod

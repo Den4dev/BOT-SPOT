@@ -52,9 +52,9 @@ QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRig
     background: #12304D; color: #D5E3F0; border: 1px solid #235074;
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }
-QPushButton#segLeft { border-top-left-radius: 10px; border-bottom-left-radius: 10px; border-right: none; }
+QPushButton#segLeft { border-top-left-radius: 6px; border-bottom-left-radius: 6px; border-right: none; }
 QPushButton#segMid, QPushButton#segMid2 { border-radius: 0; border-right: none; }
-QPushButton#segRight { border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
+QPushButton#segRight { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
 QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover { background: #1A4066; }
 QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {
     background: #168AF5;
@@ -140,6 +140,33 @@ def friendly(e: BaseException) -> str:
             or "not connected" in s.lower() or "No such file" in s:
         return f"Нет соединения / нет файла: {s}"
     return s
+
+
+_CONN_LOST_MARKS = ("dropped", "closed", "reset by peer", "broken pipe",
+                    "forcibly closed", "timed out", "not connected")
+
+
+def is_conn_lost(e: BaseException) -> bool:
+    """Похоже ли на обрыв соединения (а не на обычную ошибку вроде прав/пути).
+
+    PermissionError и FileNotFoundError сюда НЕ попадают: это штатные ответы
+    живого сервера.
+    """
+    if isinstance(e, PermissionError) or getattr(e, "errno", None) == 13 \
+            or "Permission denied" in str(e):
+        return False
+    if isinstance(e, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(e, OSError) and getattr(e, "errno", None) not in (None, 2):
+        s = str(e).lower()
+        if "no such file" in s:
+            return False
+        return any(m in s for m in _CONN_LOST_MARKS) or "socket" in type(e).__name__.lower()
+    name = type(e).__name__
+    if "SSH" in name or "EOF" in name:
+        return True
+    s = (str(e) or "").lower()
+    return any(m in s for m in _CONN_LOST_MARKS)
 
 
 def sanitized_env(env: Optional[dict] = None) -> dict:
@@ -463,6 +490,7 @@ class TransferManager(QObject):
     progressed = Signal(int, int, int, float)  # job_id, done_bytes, total_bytes, speed
     job_done = Signal(int, bool, str)          # job_id, ok, message
     conflict_needed = Signal(object)           # ConflictReq
+    conn_lost = Signal()                       # обрыв соединения во время передачи
 
     WORKERS = 2
 
@@ -532,6 +560,8 @@ class TransferManager(QObject):
             except Exception as e:  # noqa: BLE001
                 _log.warning("transfer failed: %s\n%s", e, traceback.format_exc())
                 self.job_done.emit(jid, False, friendly(e))
+                if is_conn_lost(e):
+                    self.conn_lost.emit()
 
     def _run_task(self, task: _Task) -> None:
         jid = task.job_id
@@ -802,6 +832,7 @@ class FilePane(QFrame):
     transfer_requested = Signal(str, list, str)  # src_side, src_paths, dst_dir
     status_message = Signal(str)
     navigated = Signal(str)
+    conn_lost = Signal()  # только remote-панель: обрыв соединения при операции
 
     COLS_LOCAL = ["Имя", "Размер", "Изменён"]
     COLS_REMOTE = ["Имя", "Размер", "Изменён", "Права"]
@@ -914,6 +945,12 @@ class FilePane(QFrame):
             return False
         return True
 
+    def _op_error(self, err) -> None:
+        """Ошибка операции: в статус + сигнал обрыва (только remote-панель)."""
+        self.status_message.emit(friendly(err))
+        if self.side == "remote" and is_conn_lost(err):
+            self.conn_lost.emit()
+
     # --- навигация (всё через runner) ---
     def go(self, path: str) -> None:
         if not self._need_backend():
@@ -927,6 +964,8 @@ class FilePane(QFrame):
             if err:
                 msg = friendly(err)
                 self.status_message.emit(msg)
+                if self.side == "remote" and is_conn_lost(err):
+                    self.conn_lost.emit()
                 self.edit_path.setText(self._pretty_path())
                 if not self.entries:
                     self.show_notice(msg)
@@ -1146,7 +1185,7 @@ class FilePane(QFrame):
 
         def done(_res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                self._op_error(err)
             else:
                 self.status_message.emit(f"Папка создана: {name.strip()}")
                 self.reload()
@@ -1166,7 +1205,7 @@ class FilePane(QFrame):
 
         def done(_res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                self._op_error(err)
             else:
                 self.reload()
 
@@ -1190,7 +1229,7 @@ class FilePane(QFrame):
 
         def done(res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                self._op_error(err)
                 self.reload()
                 return
             _path, entries = res
@@ -1224,7 +1263,7 @@ class FilePane(QFrame):
 
         def done(_res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                self._op_error(err)
             else:
                 self.reload()
 
@@ -1273,7 +1312,7 @@ class FilePane(QFrame):
 
         def done(res, err):
             if err:
-                self.status_message.emit(friendly(err))
+                self._op_error(err)
             else:
                 self.status_message.emit("Скопировано" + (f", пропущено: {res}" if res else ""))
                 self.reload()
@@ -1444,6 +1483,7 @@ class FilesTab(QWidget):
             pane.status_message.connect(self.set_status)
             pane.navigated.connect(self._on_pane_navigated)
             pane.chk_hidden.toggled.connect(self._on_hidden_global)
+        self.pane_remote.conn_lost.connect(self._on_conn_lost)
         self.split = QSplitter(Qt.Horizontal)
         self.split.addWidget(self.pane_local)
         self.split.addWidget(self.pane_remote)
@@ -1457,6 +1497,7 @@ class FilesTab(QWidget):
         self.queue.setMaximumHeight(210)
         self.manager.progressed.connect(self.queue.update_job)
         self.manager.job_done.connect(self._on_job_done)
+        self.manager.conn_lost.connect(self._on_conn_lost)
         self.queue.cancel_job.connect(self.manager.cancel)
         self.queue.cancel_all.connect(self.manager.cancel_all)
         self.queue.clear_finished.connect(self.queue.remove_finished)
@@ -1537,6 +1578,14 @@ class FilesTab(QWidget):
             self.pane_remote.reload()
             return
         self._connect_async()
+
+    def _on_conn_lost(self) -> None:
+        """Обрыв соединения обнаружен операцией/передачей: сброс + баннер «Переподключить»."""
+        if not self._connected:
+            return
+        self._reset_connection()
+        self._show_banner("Соединение с сервером потеряно. Нажмите «Переподключить».", error=True)
+        self.set_status("Нет соединения")
 
     def _reset_connection(self) -> None:
         with self._conn_lock:
