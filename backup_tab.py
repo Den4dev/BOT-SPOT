@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Вкладка «Бэкапы»: UI. НЕ импортирует botmanager."""
 import copy
+import posixpath
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QListWidget, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QListWidget, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -17,7 +18,7 @@ from backup_core import (
     BackupEngine, BackupStore, DaemonRunner, DEFAULT_ROOT, FIND_CMD, FIND_PY_CMD, new_job, ssh_exec,
     human_size, sanitize_name,
 )
-from ui_anim import AnimatedButton, derived
+from ui_anim import AnimatedButton, RowHoverTable, derived
 
 __all__ = ["BackupTab"]
 
@@ -297,7 +298,7 @@ class BackupTab(QWidget):
         self.actions_hint.setObjectName("statusLine")
         lay.addWidget(self.actions_hint)
 
-        self.table = QTableWidget(0, len(self.COLS))
+        self.table = RowHoverTable(0, len(self.COLS))
         self.table.setObjectName("fileTable")
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -314,6 +315,8 @@ class BackupTab(QWidget):
         h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.itemDoubleClicked.connect(lambda _it: self.backup_selected())
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._job_menu)
         lay.addWidget(self.table, 1)
 
         self.progress = QProgressBar()
@@ -441,6 +444,73 @@ class BackupTab(QWidget):
         self.store.delete_job(self._profile, sel.get("id", ""))
         self.render()
         self._log(f"Задание удалено: {sel.get('name')}")
+
+    # --- контекстное меню ---
+    def _job_menu(self, pos) -> None:
+        idx = self.table.indexAt(pos)
+        if idx.row() < 0:
+            return
+        self.table.selectRow(idx.row())
+        sel = self._selected()
+        if sel is None:
+            return
+        m = QMenu(self)
+        a_open = m.addAction("Открыть БД (скачать и открыть)")
+        a_open.setEnabled(bool((sel.get("remote") or "").strip()) and bool(self._creds))
+        a_open.triggered.connect(lambda: self.open_remote_db(sel))
+        a_bk = m.addAction("Бэкап сейчас")
+        a_bk.triggered.connect(self.backup_selected)
+        m.addSeparator()
+        a_edit = m.addAction("Изменить")
+        a_edit.triggered.connect(self.edit_job)
+        a_del = m.addAction("Удалить")
+        a_del.triggered.connect(self.delete_job)
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def open_remote_db(self, job: dict) -> None:
+        """Скачать живую БД задания с сервера в локальный корень и открыть её."""
+        remote = (job.get("remote") or "").strip()
+        if not remote or not self._creds:
+            return self._log("Нет пути к БД или подключения")
+        root = job.get("local_root") or self.store.root()
+        jobdir = Path(root) / sanitize_name(self._profile) / sanitize_name(job.get("name", ""))
+        local = jobdir / (posixpath.basename(remote) or "db.sqlite")
+        creds = dict(self._creds)
+        self._log(f"Скачиваю БД: {remote} → {local}")
+
+        def work():
+            import paramiko
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(creds["host"], port=int(creds.get("port") or 22),
+                           username=creds["user"], password=creds.get("password") or None,
+                           key_filename=creds.get("key") or None, timeout=10,
+                           allow_agent=True, look_for_keys=True)
+            try:
+                jobdir.mkdir(parents=True, exist_ok=True)
+                sftp = client.open_sftp()
+                try:
+                    sftp.get(remote, str(local))
+                finally:
+                    sftp.close()
+                return str(local)
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+        def done(path, err):
+            if err:
+                self._log(f"Не удалось скачать БД: {err}")
+                QMessageBox.warning(self, "Открыть БД", f"Не удалось скачать {remote}:\n{err}")
+                return
+            self._log(f"БД скачана: {path}")
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+        self.runner.submit(work, done)
 
     def _run_find(self, cb, kind: str = "db") -> None:
         """find на сервере в фоне, результат — в UI-поток."""

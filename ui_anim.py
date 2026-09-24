@@ -7,7 +7,7 @@ from PySide6.QtCore import (QEasingCurve, QPropertyAnimation, QRect, Qt,
                             QVariantAnimation)
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-                               QPushButton, QTextEdit, QWidget)
+                               QPushButton, QTableWidget, QTextEdit, QWidget)
 
 THEMES = {
     "graphite": {
@@ -137,6 +137,7 @@ def derive(t: dict) -> dict:
     d["glass_border"] = mix(sf, ac, 0.25)
     d["log_bg"] = mix(pg, bg, 0.5)
     d["item_hover"] = mix(ac, sf, 0.14)
+    d["row_hover"] = mix(ac, sf, 0.09)
     d["item_sel"] = mix(ac, sf, 0.42)
     d["item_sel_fg"] = on_color(d["item_sel"])
     d["row_alt"] = alpha(mix(sf, bg, 0.5), 60)
@@ -360,3 +361,50 @@ class AnimatedButton(QPushButton):
         eff = self.graphicsEffect()
         if isinstance(eff, QGraphicsDropShadowEffect) and eff.parent() is self:
             pass  # эффект пересоздастся при следующем hover
+
+
+class RowHoverTable(QTableWidget):
+    """Подсветка всей строки при наведении вместо отдельных ячеек (::item:hover).
+
+    QSS-hover красит только ячейку под курсором — здесь красим строку целиком
+    через BackgroundRole и возвращаем исходные фоны ячеек при уходе курсора.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self._hov_row = -1
+        self._hov_saved = []
+
+    def _unhover(self) -> None:
+        if self._hov_row < 0:
+            return
+        for c, orig in self._hov_saved:
+            it = self.item(self._hov_row, c)
+            if it is not None:
+                it.setData(Qt.BackgroundRole, orig)
+        self._hov_row, self._hov_saved = -1, []
+
+    def _hover(self, row: int) -> None:
+        self._unhover()
+        if row < 0 or row >= self.rowCount():
+            return
+        col = QColor(derived()["row_hover"])
+        saved = []
+        for c in range(self.columnCount()):
+            it = self.item(row, c)
+            if it is not None:
+                saved.append((c, it.data(Qt.BackgroundRole)))
+                it.setData(Qt.BackgroundRole, col)
+        self._hov_row, self._hov_saved = row, saved
+
+    def mouseMoveEvent(self, ev) -> None:
+        row = self.indexAt(ev.position().toPoint()).row()
+        if row != self._hov_row:
+            self._hover(row)
+        super().mouseMoveEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._unhover()
+        super().leaveEvent(ev)

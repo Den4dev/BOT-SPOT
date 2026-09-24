@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ui_anim import AnimatedButton, derived, on_color
+from ui_anim import AnimatedButton, RowHoverTable, derived, on_color
 
 __all__ = ["FilesTab", "build_seg_qss", "build_files_qss", "sanitized_env"]
 
@@ -85,7 +85,6 @@ QTableWidget#fileTable {{
     color: {d['tx']}; gridline-color: {d['grid']}; border: 1px solid {d['card_border']}; border-radius: {d['rs']}px;
 }}
 QTableWidget#fileTable::item {{ padding: 4px 6px; border: none; }}
-QTableWidget#fileTable::item:hover {{ background: {d['item_hover']}; }}
 QTableWidget#fileTable::item:selected {{ background: {d['item_sel']}; color: {d['item_sel_fg']}; }}
 QTableWidget#queueTable {{
     background: transparent; alternate-background-color: {d['row_alt']};
@@ -805,7 +804,7 @@ class TransferManager(QObject):
 
 
 # ---------- таблица панели ----------
-class _PaneTable(QTableWidget):
+class _PaneTable(RowHoverTable):
     def __init__(self, pane: "FilePane"):
         super().__init__(pane)
         self._pane = pane

@@ -28,7 +28,7 @@ from backup_tab import BackupTab
 from deploy_tab import DeployTab
 from env_editor import EnvDialog
 from ui_anim import (DEFAULT_THEME, THEMES, THEME_TITLES, AnimatedButton,
-                     alpha, animate_geometry, derived, fade_widget,
+                     RowHoverTable, alpha, animate_geometry, derived, fade_widget,
                      flash_last_alert, mix, on_color, register_theme_hook,
                      set_theme, shade, theme_name, tokens)
 
@@ -253,7 +253,6 @@ QTableWidget {{
     color: {d['tx']}; gridline-color: {d['grid']}; border: none; border-radius: 0;
 }}
 QTableWidget::item {{ padding: 4px 6px; border: none; }}
-QTableWidget::item:hover {{ background: {d['item_hover']}; }}
 QTableWidget::item:selected {{ background: {d['item_sel']}; color: {d['item_sel_fg']}; }}
 QHeaderView::section {{
     background: {d['header_bg']}; color: {d['header_fg']}; border: none; border-bottom: 1px solid {d['header_border']};
@@ -689,7 +688,7 @@ class Win(QMainWindow):
         self.bots_hint.setWordWrap(True)
         self.bots_hint.setObjectName("statusLine")
 
-        self.table = QTableWidget(0, len(self.COLS))
+        self.table = RowHoverTable(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -1271,6 +1270,9 @@ class Win(QMainWindow):
         return self.shown[r]
 
     def _bot_menu(self, pos) -> None:
+        idx = self.table.indexAt(pos)
+        if idx.row() >= 0:
+            self.table.selectRow(idx.row())
         row = self.current_row()
         if row is None:
             return
@@ -1287,6 +1289,10 @@ class Win(QMainWindow):
         a_env.triggered.connect(lambda: self.open_bot_env(row))
         a_term = m.addAction("Открыть терминал")
         a_term.triggered.connect(lambda: self.open_bot_terminal(row))
+        m.addSeparator()
+        a_pull = m.addAction("Git pull + рестарт")
+        a_pull.setEnabled(bool(row.get("dir")))
+        a_pull.triggered.connect(lambda: self.git_pull_bot(row))
         m.addSeparator()
         a_start = m.addAction("Старт")
         a_start.triggered.connect(lambda: self.act("start"))
@@ -1352,6 +1358,66 @@ class Win(QMainWindow):
                 self.act("restart")
 
         bg(lambda: self.ssh.run(cmd, sudo=True), done)
+
+    def git_pull_bot(self, row: dict) -> None:
+        """git pull в папке бота на сервере, при успехе — обновить файлы и рестарт."""
+        d = (row or {}).get("dir", "")
+        name = strip_docker_prefix((row or {}).get("name", ""))
+        if not d or not self.ssh.client:
+            return self.statusBar().showMessage("Нет папки бота или подключения")
+        dq = shlex.quote(d)
+        self.statusBar().showMessage(f"git pull: {name}…")
+
+        def job():
+            code, o, e = self.ssh.run(f"git -C {dq} rev-parse --is-inside-work-tree", sudo=True)
+            if code != 0:
+                raise RuntimeError("в папке бота нет git-репозитория")
+            code, o, e = self.ssh.run(f"git -C {dq} pull 2>&1", sudo=True)
+            if code != 0 and "dubious ownership" in (o or "").lower():
+                self.ssh.run(f"git config --global --add safe.directory {dq}", sudo=True)
+                code, o, e = self.ssh.run(f"git -C {dq} pull 2>&1", sudo=True)
+            return code, (o or "").strip()
+
+        def done(res, err):
+            if err:
+                self.statusBar().showMessage(f"git pull {name}: ошибка")
+                QMessageBox.warning(self, f"Git pull — {name}", str(err))
+                return
+            code, out = res
+            if code != 0:
+                self.statusBar().showMessage(f"git pull {name}: ошибка")
+                QMessageBox.warning(self, f"Git pull — {name}", out or f"ошибка, код {code}")
+                return
+            self.statusBar().showMessage(f"git pull {name}: готово, перезапускаю…")
+            self._refresh_bot_files(d)
+            kind, target = self._target(row.get("name", ""))
+
+            def restarted(r2, e2):
+                if e2:
+                    return self.statusBar().showMessage(f"Рестарт не удался: {e2}")
+                c2, _, err2 = r2
+                msg = "ок" if c2 == 0 else (err2 or "").strip() or "ошибка"
+                self.statusBar().showMessage(f"git pull {name}: готово · рестарт: {msg}")
+                self.refresh()
+                self.load_logs()
+
+            if kind == "docker":
+                bg(lambda: self.docker_exec("restart", target), restarted)
+            else:
+                bg(lambda: self.ssh.run(f"systemctl restart {shlex.quote(target)}", sudo=True), restarted)
+
+        bg(job, done)
+
+    def _refresh_bot_files(self, d: str) -> None:
+        """Если вкладка «Файлы» открыта в папке бота — перечитать её."""
+        try:
+            ft = self.files_tab
+            pane = getattr(ft, "pane_remote", None)
+            cur = (getattr(pane, "path", "") or "")
+            if cur == d or cur.startswith(d.rstrip("/") + "/"):
+                ft.open_remote_dir(cur)
+        except Exception:
+            pass
 
     def open_bot_terminal(self, row: dict) -> None:
         """Терминал без пароля: при первом вызове ставим на сервер локальный ключ и ходим с -i."""
@@ -1509,10 +1575,14 @@ class Win(QMainWindow):
                 out.append(line)
             text = "\n".join(out)
         bar = self.logs.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 4
+        val = bar.value()
+        at_bottom = val >= bar.maximum() - 4
         self.logs.setPlainText(text)
         if at_bottom or not self.live.isChecked():
             bar.setValue(bar.maximum())
+        else:
+            # пользователь листал вверх — не дёргаем его в начало/конец
+            bar.setValue(min(val, bar.maximum()))
         # новая порция логов — короткая подсветка последних WARNING/ERROR (ТЗ 5.3)
         if text != getattr(self, "_logs_fp", ""):
             self._logs_fp = text
