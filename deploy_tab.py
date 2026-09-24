@@ -78,6 +78,30 @@ class Cancelled(Exception):
     pass
 
 
+def _msg(parent, kind: str, title: str, text: str):
+    """Диалог, который точно всплывает поверх (raise+activate против 'зависаний').
+
+    kind: 'info' | 'warn' | 'q' (Да/Нет). Возвращает кнопку для 'q'.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    if kind == "q":
+        box.setIcon(QMessageBox.Question)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.button(QMessageBox.Yes).setText("Да")
+        box.button(QMessageBox.No).setText("Нет")
+    elif kind == "warn":
+        box.setIcon(QMessageBox.Warning)
+        box.setStandardButtons(QMessageBox.Ok)
+    else:
+        box.setIcon(QMessageBox.Information)
+        box.setStandardButtons(QMessageBox.Ok)
+    box.raise_()
+    box.activateWindow()
+    return box.exec()
+
+
 class DaemonRunner(QObject):
     arrived = Signal(object, object, object)
 
@@ -917,9 +941,13 @@ class DeployTab(QWidget):
         self._creds = None
         self._profile = ""
         self._running = False
+        self._checking = False
         self._last_info = {}
         self._state = self._load_state()
         self.runner = DaemonRunner(self)
+        # быстрые независимые операции (проверка сервера, списки): свой поток,
+        # чтобы не вставать за долгой задачей (напр. стриминг pip) в runner
+        self.runner_fast = DaemonRunner(self)
         self.engine = DeployEngine(self)
 
         lay = QVBoxLayout(self)
@@ -1088,7 +1116,7 @@ class DeployTab(QWidget):
 
     def _need(self) -> bool:
         if not self._creds:
-            QMessageBox.information(self, "Деплой", "Сначала подключитесь к серверу.")
+            _msg(self, "info", "Деплой", "Сначала подключитесь к серверу.")
             return False
         return True
 
@@ -1141,32 +1169,36 @@ class DeployTab(QWidget):
         if self._running or not self._need():
             return
         if not self._local_dir or not os.path.isdir(self._local_dir):
-            return QMessageBox.warning(self, "Деплой", "Выберите папку с ботом.")
+            _msg(self, "warn", "Деплой", "Выберите папку с ботом.")
+            return
         p = self._params()
         if not valid_service_name(p["service"]):
-            return QMessageBox.warning(self, "Деплой",
-                                       "Имя сервиса: латиница, цифры, _ и -, с буквы, до 40 символов.")
+            _msg(self, "warn", "Деплой",
+                 "Имя сервиса: латиница, цифры, _ и -, с буквы, до 40 символов.")
+            return
         if not p["entry"].endswith(".py"):
-            return QMessageBox.warning(self, "Деплой", "Точка входа — .py файл из корня проекта.")
+            _msg(self, "warn", "Деплой", "Точка входа — .py файл из корня проекта.")
+            return
         if not p["server_dir"].startswith("/"):
-            return QMessageBox.warning(self, "Деплой", "Папка на сервере — абсолютный путь.")
+            _msg(self, "warn", "Деплой", "Папка на сервере — абсолютный путь.")
+            return
         info = analyze_project(self._local_dir)
         if not info["requirements"]:
-            if QMessageBox.question(self, "Деплой",
-                                    "Нет requirements.txt — зависимости не поставятся. Продолжить?") \
+            if _msg(self, "q", "Деплой",
+                    "Нет requirements.txt — зависимости не поставятся. Продолжить?") \
                     != QMessageBox.Yes:
                 return
         if not info["env"]:
-            if QMessageBox.question(self, "Деплой",
-                                    "Нет .env — боту может не хватить настроек. Продолжить?") \
+            if _msg(self, "q", "Деплой",
+                    "Нет .env — боту может не хватить настроек. Продолжить?") \
                     != QMessageBox.Yes:
                 return
         else:
             issues = check_dotenv(os.path.join(self._local_dir, ".env"))
             if issues:
                 lines = "\n".join(f"строка {n}: {msg}" for n, _k, msg in issues[:8])
-                if QMessageBox.question(self, "Деплой",
-                                        f".env с подозрительным форматом:\n{lines}\nПродолжить?") \
+                if _msg(self, "q", "Деплой",
+                        f".env с подозрительным форматом:\n{lines}\nПродолжить?") \
                         != QMessageBox.Yes:
                     return
         self._set_running(True)
@@ -1177,9 +1209,12 @@ class DeployTab(QWidget):
         self.engine.install(p, dict(self._creds))
 
     def check_server(self) -> None:
-        if self._running or not self._need():
+        if self._running or self._checking or not self._need():
             return
         creds = dict(self._creds)
+        self._checking = True
+        self.btn_check.setEnabled(False)
+        self.progress.setFormat("Проверка сервера…")
         self._log("Проверка сервера…")
 
         def work():
@@ -1192,7 +1227,7 @@ class DeployTab(QWidget):
                            allow_agent=True, look_for_keys=True)
             try:
                 rc, o, _e = ssh_exec(client, "cat /etc/os-release; echo ---; python3 --version 2>&1; echo ---; id -u")
-                return o, None
+                return o
             finally:
                 try:
                     client.close()
@@ -1200,6 +1235,9 @@ class DeployTab(QWidget):
                     pass
 
         def done(res, err):
+            self._checking = False
+            self.btn_check.setEnabled(True)
+            self.progress.setFormat("Готов")
             if err:
                 self._log(f"Проверка не удалась: {err}")
                 return
@@ -1207,7 +1245,7 @@ class DeployTab(QWidget):
                 [l for l in (res or '').splitlines() if l][:6]).replace("---", "·")[:160])
             self._log("Проверка сервера готова")
 
-        self.runner.submit(work, done)
+        self.runner_fast.submit(work, done)
 
     # --- обновление / удаление ---
     def _fetch_units(self, cb) -> None:
@@ -1226,14 +1264,14 @@ class DeployTab(QWidget):
                            key_filename=creds.get("key") or None, timeout=10,
                            allow_agent=True, look_for_keys=True)
             try:
-                return eng.list_units(client), None
+                return eng.list_units(client)
             finally:
                 try:
                     client.close()
                 except Exception:
                     pass
 
-        self.runner.submit(work, lambda res, err: cb(res, err))
+        self.runner_fast.submit(work, lambda res, err: cb(res, err))
 
     def open_update(self) -> None:
         if self._running or not self._need():
@@ -1254,7 +1292,8 @@ class DeployTab(QWidget):
                 return
             local_dir = dlg.e_dir.text().strip()
             if not local_dir or not os.path.isdir(local_dir):
-                return QMessageBox.warning(self, "Деплой", "Выберите папку с новой версией.")
+                _msg(self, "warn", "Деплой", "Выберите папку с новой версией.")
+                return
             self._state["protected"] = dlg.protected()
             self._save_state()
             server_dir = ""
@@ -1326,8 +1365,8 @@ class DeployTab(QWidget):
         info = self._last_info
         if not info.get("created_dir") or not info.get("server_dir") or not self._need():
             return
-        if QMessageBox.question(self, "Деплой",
-                                f'Удалить папку {info["server_dir"]} на сервере?') != QMessageBox.Yes:
+        if _msg(self, "q", "Деплой",
+                 f'Удалить папку {info["server_dir"]} на сервере?') != QMessageBox.Yes:
             return
         self._set_running(True)
         eng = self.engine
@@ -1362,7 +1401,7 @@ class DeployTab(QWidget):
                 self._log(f"Папка удалена: {server_dir}")
                 self.btn_rmdir.hide()
 
-        self.runner.submit(work, done)
+        self.runner_fast.submit(work, done)
 
     # --- слоты движка ---
     def _set_running(self, on: bool) -> None:

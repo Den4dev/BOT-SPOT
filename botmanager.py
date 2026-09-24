@@ -174,7 +174,6 @@ class LogHighlighter(QSyntaxHighlighter):
 THEME_QSS = """
 * { outline: none; }
 QMainWindow { background: #081726; }
-QWidget#root { background: transparent; }
 QFrame#topbar { background: #081726; border: none; border-bottom: 1px solid #1A3A59; border-radius: 0; }
 QLabel { color: #F1F6FC; }
 QLabel#title { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: #F1F6FC; }
@@ -190,7 +189,6 @@ QFrame#card {
 QFrame#glassCard {
     background: rgba(20, 65, 100, 140); border: 1px solid #26587E; border-radius: 12px;
 }
-QFrame#gradCard { background: transparent; border: none; }
 QFrame#logCard {
     background: #071A2D; border: 1px solid #214D6D; border-radius: 12px;
 }
@@ -554,7 +552,6 @@ class Win(QMainWindow):
         prof_bar.addWidget(self.btn_rename)
         prof_bar.addWidget(self.btn_delete)
         prof_wrap = QWidget()
-        prof_wrap.setStyleSheet("background: transparent;")
         prof_wrap.setLayout(prof_bar)
         self.host, self.port, self.user = QLineEdit(), QLineEdit("22"), QLineEdit("root")
         self.pw, self.key = QLineEdit(), QLineEdit()
@@ -721,7 +718,6 @@ class Win(QMainWindow):
         topbar.setObjectName("topbar")
         topbar.setLayout(head)
         mid = QWidget()
-        mid.setStyleSheet("background: transparent;")
         midlay = QVBoxLayout(mid)
         midlay.setContentsMargins(14, 0, 14, 0)
         midlay.setSpacing(12)
