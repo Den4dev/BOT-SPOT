@@ -14,7 +14,7 @@ import paramiko
 from PySide6.QtCore import QByteArray, QEvent, QObject, QProcess, QProcessEnvironment, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPixmap, QRadialGradient, QSyntaxHighlighter,
-                           QTextCharFormat)
+                           QTextCharFormat, QTextCursor)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame, QGraphicsDropShadowEffect,
@@ -1574,11 +1574,33 @@ class Win(QMainWindow):
                     continue
                 out.append(line)
             text = "\n".join(out)
+        cur = self.logs.textCursor()
+        # selectedText() отдаёт \u2029 вместо \n — нормализуем для поиска
+        sel_text = cur.selectedText().replace("\u2029", "\n") if cur.hasSelection() else ""
+        old_start, old_end = cur.selectionStart(), cur.selectionEnd()
+        if text == self.logs.toPlainText():
+            return  # ничего не изменилось — не сносим выделение и не дёргаем скролл
         bar = self.logs.verticalScrollBar()
         val = bar.value()
         at_bottom = val >= bar.maximum() - 4
         self.logs.setPlainText(text)
-        if at_bottom or not self.live.isChecked():
+        if sel_text:
+            # было выделение: ищем тот же фрагмент в новом тексте (строки
+            # дописываются в конец, ищем вперёд от старой позиции), скролл держим
+            idx = text.find(sel_text, max(0, old_start - len(sel_text)))
+            if idx < 0:
+                idx = text.find(sel_text)
+            nc = self.logs.textCursor()
+            if idx >= 0:
+                nc.setPosition(idx)
+                nc.setPosition(idx + len(sel_text), QTextCursor.KeepAnchor)
+            else:
+                n = len(text)
+                nc.setPosition(min(old_start, n))
+                nc.setPosition(min(old_end, n), QTextCursor.KeepAnchor)
+            self.logs.setTextCursor(nc)
+            bar.setValue(min(val, bar.maximum()))
+        elif at_bottom or not self.live.isChecked():
             bar.setValue(bar.maximum())
         else:
             # пользователь листал вверх — не дёргаем его в начало/конец
