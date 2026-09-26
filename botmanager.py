@@ -39,6 +39,7 @@ except Exception:
 
 CFG = Path.home() / ".botmanager.json"
 KR_SERVICE = "botmanager"
+CONNECT_WATCHDOG_MS = 45000  # если коннект висит дольше — разблокировать кнопку
 TG_RE = "aiogram|telebot|telegram|pyrogram|telethon|tgbotapi|telego|telegraf|grammy|node-telegram|BOT_TOKEN|TG_TOKEN|TELEGRAM_BOT|api\\.telegram\\.org"
 # системные префиксы — не папки проектов, пропускаем при угадывании каталога бота
 SKIP_BIN_PREFIX = ("/usr/bin", "/usr/sbin", "/usr/lib", "/bin", "/sbin", "/lib", "/etc/systemd",
@@ -299,14 +300,21 @@ class SSH:
         c.connect(host, port=port, username=user, password=password or None,
                   key_filename=key or None, timeout=10, allow_agent=True, look_for_keys=True)
         c.get_transport().set_keepalive(20)
-        self.client, self.user, self.password = c, user, password
+        old, self.client = self.client, c
+        self.user, self.password = user, password
+        if old is not None:  # не копим висящие сессии на сервере
+            try:
+                old.close()
+            except Exception:
+                pass
 
-    def run(self, cmd, sudo=False):
+    def run(self, cmd, sudo=False, timeout=30):
         need_sudo = sudo and self.user != "root"
         if need_sudo:
             cmd = ("sudo -S -p '' " if self.password else "sudo -n ") + cmd
         with self.lock:
-            stdin, out, err = self.client.exec_command(cmd)
+            # timeout ограничивает чтение канала: зависший сервер не копит треды вечно
+            stdin, out, err = self.client.exec_command(cmd, timeout=timeout)
             if need_sudo and self.password:
                 stdin.write(self.password + "\n")
                 stdin.flush()
@@ -544,7 +552,12 @@ def bg(fn, cb):
         except Exception as e:  # noqa: BLE001
             res, err = None, e
         bridge.done.emit(cb, res, err)
-    threading.Thread(target=worker, daemon=True).start()
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except RuntimeError as e:
+        # треды кончились (долгая сессия с кучей висящих) — не вешаем UI,
+        # сразу отдаём ошибку в колбэк, он разблокирует кнопки
+        cb(None, e)
 
 
 def load_cfg():
@@ -571,6 +584,7 @@ class Win(QMainWindow):
         self.log_name = None
         self.log_raw = ""
         self.shown = []
+        self._busy_log = False
 
         # --- шапка с эмблемкой ---
         logo = QLabel()
@@ -903,6 +917,7 @@ class Win(QMainWindow):
         self.t_refresh.stop()
         self.t_monitor.stop()
         self.t_logs.stop()
+        self._busy_log = False
         c, self.ssh.client = self.ssh.client, None
         try:
             if c is not None:
@@ -1084,6 +1099,8 @@ class Win(QMainWindow):
         # выбран сохранённый профиль — подключаемся под его именем, нового не создаём
         selected = self.prof.currentText()
         reuse = selected if selected in self.cfg["profiles"] else None
+        self._conn_seq = getattr(self, "_conn_seq", 0) + 1
+        seq = self._conn_seq
 
         def job():
             self.ssh.connect(host, port, user, pw, key)
@@ -1091,6 +1108,8 @@ class Win(QMainWindow):
 
         def done(name, err):
             self.btn_conn.setEnabled(True)
+            if seq != self._conn_seq:
+                return  # устаревший ответ от зависшего коннекта — игнорим
             if err:
                 return self.statusBar().showMessage(f"Ошибка подключения: {err}")
             self.cfg["profiles"][name] = {"host": host, "port": port, "user": user, "key": key}
@@ -1113,6 +1132,15 @@ class Win(QMainWindow):
             self.deploy_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
 
         bg(job, done)
+        QTimer.singleShot(CONNECT_WATCHDOG_MS,
+                          lambda: self._connect_watchdog(seq))
+
+    def _connect_watchdog(self, seq):
+        """Коннект висит дольше CONNECT_WATCHDOG_MS — разблокировать кнопку,
+        чтобы клики не игнорились. Поздний ответ станет stale и будет проигнорирован."""
+        if seq == getattr(self, "_conn_seq", 0) and not self.btn_conn.isEnabled():
+            self.btn_conn.setEnabled(True)
+            self.statusBar().showMessage("Превышено время ожидания — проверь хост/сеть и жми ещё раз")
 
     # --- список ботов ---
     def monitor_tick(self):
@@ -1542,12 +1570,14 @@ class Win(QMainWindow):
 
     def _load_logs_n(self, n: int):
         name = self.current()
-        if not name or not self.ssh.client:
-            return
+        if not name or not self.ssh.client or self._busy_log:
+            return  # прошлый запрос ещё висит — не плодим треды
         self.log_name = name
         self.log_title.setText(f"Логи: {strip_docker_prefix(name)}")
+        self._busy_log = True
 
         def done(res, err):
+            self._busy_log = False
             if err or name != self.log_name:
                 return
             self.log_raw = res[1] or res[2]
