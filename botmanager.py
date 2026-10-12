@@ -354,6 +354,62 @@ def boot_key_pair():
     return str(BOOT_KEY), pub_file.read_text(encoding="ascii").strip()
 
 
+def _installed_record_path():
+    return Path(str(BOOT_KEY) + ".installed")
+
+
+def _read_installed_record():
+    """Строки ключей, которые МЫ раньше ставили (для удаления устаревших)."""
+    try:
+        return [l for l in _installed_record_path().read_text(encoding="ascii").splitlines() if l.strip()]
+    except OSError:
+        return []
+
+
+def _write_installed_record(pub_line):
+    try:
+        _installed_record_path().write_text(pub_line.strip() + "\n", encoding="ascii")
+    except OSError:
+        pass
+
+
+def _parse_key_line(line):
+    """(type, blob) для строки ключа; None для пустых/комментариев/мусора.
+
+    Префиксы опций (command="...", environment="...") пропускаются — ищем
+    токен типа ключа. Блоб base64 никогда не содержит '-', поэтому сравнение
+    идёт строго по паре (type, blob), а не подстрокой.
+    """
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    toks = s.split()
+    for i, t in enumerate(toks):
+        if t.startswith("ssh-") or t.startswith("ecdsa-") or t.startswith("sk-"):
+            if i + 1 < len(toks):
+                return (t, toks[i + 1])
+            return None
+    return None
+
+
+def prune_authorized_keys(text, owned):
+    """Удаляет ТОЛЬКО строки, чей (type, blob) точно есть в owned (наши ключи).
+
+    Всё остальное — чужие ключи, комментарии, пустые строки, мусор —
+    возвращается байт в байт (включая окончания строк). Возвращает
+    (новый_текст, число_удалённых).
+    """
+    out = []
+    removed = 0
+    for line in (text or "").splitlines(keepends=True):
+        parsed = _parse_key_line(line)
+        if parsed is not None and parsed in owned:
+            removed += 1
+            continue
+        out.append(line)
+    return "".join(out), removed
+
+
 def _exec_tokens(d):
     """Токены запуска юнита: сначала argv[] из systemctl show, иначе сам ExecStart."""
     m = re.search(r"argv\[\]=([^;]*)", d.get("ExecStart", ""))
@@ -1494,15 +1550,60 @@ class Win(QMainWindow):
 
         def job():
             key_path, pub = boot_key_pair()
-            # самоустановка: вычищаем любые строки с нашим маркером (в т.ч. устаревшие
-            # от прежних ключей) и дописываем ровно текущий публичный ключ
-            cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys"
-                   f" && {{ grep -vF {shlex.quote(BOOT_COMMENT)} ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp || true; }}"
-                   " && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-                   f" && echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys")
-            code, _, e = self.ssh.run(cmd)
+            parts = pub.split()
+            if len(parts) < 2:
+                raise RuntimeError("свой pubkey не распарсился")
+            cur_type, cur_blob = parts[0], parts[1]
+            # удаляем только СВОИ прежние ключи (точное совпадение type+blob),
+            # чужие строки не трогаем никогда
+            owned = {(cur_type, cur_blob)}
+            for pl in _read_installed_record():
+                pp = pl.split()
+                if len(pp) >= 2:
+                    owned.add((pp[0], pp[1]))
+            # 1. каталог (недеструктивно, без перезаписи файла)
+            code, _, e = self.ssh.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+                                      " && touch ~/.ssh/authorized_keys"
+                                      " && chmod 600 ~/.ssh/authorized_keys")
             if code != 0:
                 raise RuntimeError((e or "").strip() or f"код {code}")
+            # 2. читаем текущий файл как есть
+            code, cur_text, e = self.ssh.run("cat ~/.ssh/authorized_keys")
+            if code != 0:
+                raise RuntimeError((e or "").strip() or f"код {code}")
+            new_text, removed = prune_authorized_keys(cur_text, owned)
+            want = pub.strip()
+            present = any(l.strip() == want for l in new_text.splitlines())
+            if not present:
+                if new_text and not new_text.endswith("\n"):
+                    new_text += "\n"
+                new_text += want + "\n"
+            if new_text != cur_text:
+                # 3. бэкап ДО записи
+                code, _, e = self.ssh.run("cp -p ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak-botspot")
+                if code != 0:
+                    raise RuntimeError("не сделался бэкап authorized_keys: " + (e or "").strip())
+                # 4. запись через tmp + mv (атомарно, без grep-перезаписи)
+                b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
+                code, _, e = self.ssh.run(
+                    f"printf %s {b64} | base64 -d > ~/.ssh/authorized_keys.tmp-botspot"
+                    " && chmod 600 ~/.ssh/authorized_keys.tmp-botspot"
+                    " && mv ~/.ssh/authorized_keys.tmp-botspot ~/.ssh/authorized_keys"
+                    " && chmod 600 ~/.ssh/authorized_keys")
+                if code != 0:
+                    raise RuntimeError("не записался authorized_keys: " + (e or "").strip())
+                # 5. проверка чтением: наш ключ есть, чужие строки на месте
+                code, back, e = self.ssh.run("cat ~/.ssh/authorized_keys")
+                if code != 0:
+                    raise RuntimeError("запись не подтвердилась чтением")
+                back_lines = [l.strip() for l in back.splitlines() if l.strip()]
+                if want not in back_lines:
+                    raise RuntimeError("нашего ключа нет после записи — смотри .bak-botspot")
+                from collections import Counter as _Counter
+                old_n = len([l for l in cur_text.splitlines() if l.strip()])
+                if len(back_lines) != old_n - removed + (0 if present else 1):
+                    raise RuntimeError("число строк не сошлось — смотри .bak-botspot")
+            _write_installed_record(want)
             # проверка ровно тем способом, которым пойдёт ssh.exe: вход по ключу, без пароля/агента
             probe = paramiko.SSHClient()
             probe.set_missing_host_key_policy(paramiko.AutoAddPolicy())
