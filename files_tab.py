@@ -54,15 +54,15 @@ def build_seg_qss(d: dict) -> str:
     base = d["btn"]
     hover = d["btn_hover"]
     return f"""
-QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segRight {{
+QPushButton#segLeft, QPushButton#segMid, QPushButton#segMid2, QPushButton#segMid3, QPushButton#segRight {{
     background: {base}; color: {d['tx']}; border: 1px solid {d['ln_solid']};
     padding: 7px 22px; font-weight: 700; font-size: 12px;
 }}
 QPushButton#segLeft {{ border-radius: 0; border-top-left-radius: {d['rs']}px; border-bottom-left-radius: {d['rs']}px; border-right: none; }}
-QPushButton#segMid, QPushButton#segMid2 {{ border-radius: 0; border-right: none; }}
+QPushButton#segMid, QPushButton#segMid2, QPushButton#segMid3 {{ border-radius: 0; border-right: none; }}
 QPushButton#segRight {{ border-radius: 0; border-top-right-radius: {d['rs']}px; border-bottom-right-radius: {d['rs']}px; }}
-QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segRight:hover {{ background: {hover}; }}
-QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segRight:checked {{
+QPushButton#segLeft:hover, QPushButton#segMid:hover, QPushButton#segMid2:hover, QPushButton#segMid3:hover, QPushButton#segRight:hover {{ background: {hover}; }}
+QPushButton#segLeft:checked, QPushButton#segMid:checked, QPushButton#segMid2:checked, QPushButton#segMid3:checked, QPushButton#segRight:checked {{
     background: transparent;
     color: {on_color(d['ac'])};
     border: 1px solid transparent;

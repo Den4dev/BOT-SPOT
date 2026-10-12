@@ -11,7 +11,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 import paramiko
-from PySide6.QtCore import QByteArray, QEvent, QObject, QProcess, QProcessEnvironment, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter,
                            QPainterPath, QPixmap, QRadialGradient, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor)
@@ -23,9 +23,10 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from files_tab import FilesTab, build_seg_qss, sanitized_env
+from files_tab import FilesTab, build_seg_qss
 from backup_tab import BackupTab
 from deploy_tab import DeployTab
+from terminal_tab import TerminalTab
 from env_editor import EnvDialog
 from ui_anim import (DEFAULT_THEME, THEMES, THEME_TITLES, AnimatedButton,
                      RowHoverTable, alpha, animate_geometry, derived, fade_widget,
@@ -40,6 +41,18 @@ except Exception:
 CFG = Path.home() / ".botmanager.json"
 KR_SERVICE = "botmanager"
 CONNECT_WATCHDOG_MS = 45000  # если коннект висит дольше — разблокировать кнопку
+RECONNECT_START_S = 15  # первый автопереподключатель, дальше бэкофф до RECONNECT_MAX_S
+RECONNECT_MAX_S = 60
+
+
+def _is_auth_error(err) -> bool:
+    """Похоже ли на ошибку аутентификации (такие НЕ ретраим — иначе fail2ban)."""
+    s = str(err or "").lower()
+    keys = ("authentication fail", "no authentication methods", "private key",
+            "not a valid", "key file", "encrypted", "need password", "passphrase",
+            "bad password", "password authentication", "login fail", "access denied",
+            "unauthorized", "auth fail")
+    return any(k in s for k in keys)
 TG_RE = "aiogram|telebot|telegram|pyrogram|telethon|tgbotapi|telego|telegraf|grammy|node-telegram|BOT_TOKEN|TG_TOKEN|TELEGRAM_BOT|api\\.telegram\\.org"
 # системные префиксы — не папки проектов, пропускаем при угадывании каталога бота
 SKIP_BIN_PREFIX = ("/usr/bin", "/usr/sbin", "/usr/lib", "/bin", "/sbin", "/lib", "/etc/systemd",
@@ -633,7 +646,6 @@ class Win(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1180, 780)
         self.ssh = SSH()
-        self._term_keys = set()  # user@host:port, куда уже поставили ключ терминала
         self.cfg = load_cfg()
         self.rows = []
         self.busy = False
@@ -848,13 +860,14 @@ class Win(QMainWindow):
         self.btn_mode_files = QPushButton("Файлы")
         self.btn_mode_backup = QPushButton("Бэкапы")
         self.btn_mode_deploy = QPushButton("Деплой")
+        self.btn_mode_term = QPushButton("Терминал")
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
         seg = QHBoxLayout()
         seg.setSpacing(0)
-        seg_names = ("segLeft", "segMid", "segMid2", "segRight")
+        seg_names = ("segLeft", "segMid", "segMid2", "segMid3", "segRight")
         seg_btns = (self.btn_mode_bots, self.btn_mode_files,
-                    self.btn_mode_backup, self.btn_mode_deploy)
+                    self.btn_mode_backup, self.btn_mode_deploy, self.btn_mode_term)
         for i, b in enumerate(seg_btns):
             b.setCheckable(True)
             b.setObjectName(seg_names[i])
@@ -901,19 +914,23 @@ class Win(QMainWindow):
         self.files_tab = FilesTab()
         self.backup_tab = BackupTab()
         self.deploy_tab = DeployTab()
+        self.terminal_tab = TerminalTab()
         self.pages = QStackedWidget()
         self.pages.addWidget(split)         # 0 — Боты: ровно тот же split, что и раньше
         self.pages.addWidget(self.files_tab)  # 1 — Файлы
         self.pages.addWidget(self.backup_tab)  # 2 — Бэкапы
         self.pages.addWidget(self.deploy_tab)  # 3 — Деплой
+        self.pages.addWidget(self.terminal_tab)  # 4 — Терминал
         self._set_server_ui(False)  # без подключения панели действий скрыты (как в «Файлах»)
         self._seg_buttons = (self.btn_mode_bots, self.btn_mode_files,
-                               self.btn_mode_backup, self.btn_mode_deploy)
+                             self.btn_mode_backup, self.btn_mode_deploy,
+                             self.btn_mode_term)
         QTimer.singleShot(0, lambda: self._move_seg_glow(0, animate=False))
         mode_group.idClicked.connect(self._move_seg_glow)
         mode_group.idClicked.connect(self.pages.setCurrentIndex)
         self.pages.currentChanged.connect(self._page_crossfade)
         mode_group.idClicked.connect(lambda i: i == 1 and self.files_tab.activate())
+        mode_group.idClicked.connect(lambda i: i == 4 and self.terminal_tab.activate())
         self.deploy_tab.open_bots_requested.connect(lambda: self.pages.setCurrentIndex(0))
 
         topbar = QFrame()
@@ -936,7 +953,7 @@ class Win(QMainWindow):
         self.btn_conn.setGraphicsEffect(conn_glow)
         self.conn_glow = conn_glow
 
-        self.btn_conn.clicked.connect(self.connect_ssh)
+        self.btn_conn.clicked.connect(lambda: self.connect_ssh())
         self.pw.returnPressed.connect(self.connect_ssh)
         self.prof.currentTextChanged.connect(self.pick_profile)
         self.btn_rename.clicked.connect(self.rename_profile)
@@ -954,6 +971,11 @@ class Win(QMainWindow):
         self.t_refresh = QTimer(self, interval=5000, timeout=self.refresh)
         self.t_logs = QTimer(self, interval=2000, timeout=self.load_logs)
         self.t_monitor = QTimer(self, interval=10000, timeout=self.monitor_tick)
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setSingleShot(False)
+        self._reconnect_timer.timeout.connect(self._try_reconnect)
+        self._reconnect_delay = RECONNECT_START_S
+        self._last_conn = None
         self.live.toggled.connect(lambda on: self.t_logs.start() if on else self.t_logs.stop())
 
         last = self.cfg.get("last")
@@ -981,7 +1003,30 @@ class Win(QMainWindow):
         except Exception:
             pass
         self._set_server_ui(False)
-        self.statusBar().showMessage("Связь с сервером потеряна — переподключитесь карточкой выше")
+        if self._last_conn:
+            # была рабочая сессия — пробуем переподключаться сами
+            self._reconnect_delay = RECONNECT_START_S
+            self._reconnect_timer.setInterval(int(self._reconnect_delay * 1000))
+            self._reconnect_timer.start()
+            self.statusBar().showMessage("Связь с сервером потеряна — переподключаюсь…")
+        else:
+            self.statusBar().showMessage("Связь с сервером потеряна — переподключитесь карточкой выше")
+
+    def _try_reconnect(self) -> None:
+        """Тик автопереподключения: только если реально отвалились и никто не мешает."""
+        if self.ssh.client or not self.btn_conn.isEnabled() or not self._last_conn:
+            if self.ssh.client or not self._last_conn:
+                self._reconnect_timer.stop()
+            return
+        c = self._last_conn
+        cur = (self.host.text().strip(), self.port.text().strip(),
+               self.user.text().strip(), self.key.text().strip())
+        if cur != (c["host"], str(c["port"]), c["user"], c["key"]):
+            # пользователь правит поля вручную — отдаём управление ему
+            self._reconnect_timer.stop()
+            return
+        self.statusBar().showMessage(f"Переподключение к {c['host']}…")
+        self.connect_ssh(auto=True)
 
     def _move_seg_glow(self, i: int, animate: bool = True) -> None:
         """Индикатор активной секции скользит подложкой под кнопками (ТЗ 5.2)."""
@@ -1141,14 +1186,20 @@ class Win(QMainWindow):
         self._refresh_prof_list()
         self.statusBar().showMessage(f"Профиль удалён: {old}")
 
-    def connect_ssh(self):
+    def connect_ssh(self, auto=False):
+        """Ручной (auto=False) или автоматический (auto=True) коннект.
+        Возвращает True, если попытка реально стартовала."""
+        if not auto:
+            self._reconnect_timer.stop()  # пользователь взял управление на себя
         host, user, key, pw = self.host.text().strip(), self.user.text().strip(), self.key.text().strip(), self.pw.text()
         try:
             port = int(self.port.text() or 22)
         except ValueError:
-            return self.statusBar().showMessage("Порт должен быть числом")
+            self.statusBar().showMessage("Порт должен быть числом")
+            return False
         if not host or not user:
-            return self.statusBar().showMessage("Укажи хост и пользователя")
+            self.statusBar().showMessage("Укажи хост и пользователя")
+            return False
         self.btn_conn.setEnabled(False)
         self.statusBar().showMessage(f"Подключаюсь к {host}…")
 
@@ -1167,7 +1218,23 @@ class Win(QMainWindow):
             if seq != self._conn_seq:
                 return  # устаревший ответ от зависшего коннекта — игнорим
             if err:
+                if self._reconnect_timer.isActive():
+                    # это была автопопытка: auth-ошибки не ретраим (fail2ban!),
+                    # сетевые — повторяем с растущей паузой
+                    if _is_auth_error(err):
+                        self._reconnect_timer.stop()
+                        return self.statusBar().showMessage(
+                            f"Автопереподключение остановлено: {err}")
+                    self._reconnect_delay = min(self._reconnect_delay * 1.5, RECONNECT_MAX_S)
+                    self._reconnect_timer.setInterval(int(self._reconnect_delay * 1000))
+                    return self.statusBar().showMessage(
+                        f"Переподключение не удалось ({err}), следующая попытка через "
+                        f"{int(self._reconnect_delay)} с")
                 return self.statusBar().showMessage(f"Ошибка подключения: {err}")
+            self._reconnect_timer.stop()
+            self._reconnect_delay = RECONNECT_START_S
+            self._last_conn = dict(host=host, port=port, user=user,
+                                   password=pw, key=key, profile=name)
             self.cfg["profiles"][name] = {"host": host, "port": port, "user": user, "key": key}
             self.cfg["last"] = name
             self._save_cfg()
@@ -1186,10 +1253,12 @@ class Win(QMainWindow):
             self.files_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
             self.backup_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
             self.deploy_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
+            self.terminal_tab.on_connected(dict(host=host, port=port, user=user, password=pw, key=key, profile=name))
 
         bg(job, done)
         QTimer.singleShot(CONNECT_WATCHDOG_MS,
                           lambda: self._connect_watchdog(seq))
+        return True
 
     def _connect_watchdog(self, seq):
         """Коннект висит дольше CONNECT_WATCHDOG_MS — разблокировать кнопку,
@@ -1504,129 +1573,13 @@ class Win(QMainWindow):
             pass
 
     def open_bot_terminal(self, row: dict) -> None:
-        """Терминал без пароля: при первом вызове ставим на сервер локальный ключ и ходим с -i."""
-        host, user = self.host.text().strip(), self.user.text().strip()
-        try:
-            port = str(int(self.port.text() or 22))
-        except ValueError:
-            port = "22"
-        if not host or not user:
-            return self.statusBar().showMessage("Укажи хост и пользователя")
+        """Встроенный терминал: переход на вкладку + cd в папку бота."""
         d = (row or {}).get("dir", "")
-        remote = f"cd {shlex.quote(d)} && exec bash -l" if d else "exec bash -l"
-        target = f"{user}@{host}:{port}"
-
-        def clean_env():
-            pe = QProcessEnvironment()
-            for k, v in sanitized_env().items():
-                pe.insert(k, v)
-            return pe
-
-        def launch(key_path):
-            args = ["ssh", "-t"]
-            if key_path:
-                args += ["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no"]
-            args += ["-p", port, f"{user}@{host}", remote]
-            proc = QProcess()
-            proc.setProcessEnvironment(clean_env())
-            proc.setProgram("wt.exe")
-            proc.setArguments(args)
-            if proc.startDetached():
-                return self.statusBar().showMessage(f"Терминал: {user}@{host}")
-            fb = QProcess()
-            fb.setProcessEnvironment(clean_env())
-            fb.setProgram("cmd")
-            fb.setArguments(["/c", "start", ""] + args)
-            if fb.startDetached():
-                return self.statusBar().showMessage(f"Терминал: {user}@{host}")
-            self.statusBar().showMessage("Не запустился ни wt.exe, ни ssh")
-
-        if not self.ssh.client:
-            return launch(None)
-        if target in self._term_keys:
-            return launch(str(BOOT_KEY))
-
-        self.statusBar().showMessage("Готовлю беспарольный доступ для терминала…")
-
-        def job():
-            key_path, pub = boot_key_pair()
-            parts = pub.split()
-            if len(parts) < 2:
-                raise RuntimeError("свой pubkey не распарсился")
-            cur_type, cur_blob = parts[0], parts[1]
-            # удаляем только СВОИ прежние ключи (точное совпадение type+blob),
-            # чужие строки не трогаем никогда
-            owned = {(cur_type, cur_blob)}
-            for pl in _read_installed_record():
-                pp = pl.split()
-                if len(pp) >= 2:
-                    owned.add((pp[0], pp[1]))
-            # 1. каталог (недеструктивно, без перезаписи файла)
-            code, _, e = self.ssh.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-                                      " && touch ~/.ssh/authorized_keys"
-                                      " && chmod 600 ~/.ssh/authorized_keys")
-            if code != 0:
-                raise RuntimeError((e or "").strip() or f"код {code}")
-            # 2. читаем текущий файл как есть
-            code, cur_text, e = self.ssh.run("cat ~/.ssh/authorized_keys")
-            if code != 0:
-                raise RuntimeError((e or "").strip() or f"код {code}")
-            new_text, removed = prune_authorized_keys(cur_text, owned)
-            want = pub.strip()
-            present = any(l.strip() == want for l in new_text.splitlines())
-            if not present:
-                if new_text and not new_text.endswith("\n"):
-                    new_text += "\n"
-                new_text += want + "\n"
-            if new_text != cur_text:
-                # 3. бэкап ДО записи
-                code, _, e = self.ssh.run("cp -p ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak-botspot")
-                if code != 0:
-                    raise RuntimeError("не сделался бэкап authorized_keys: " + (e or "").strip())
-                # 4. запись через tmp + mv (атомарно, без grep-перезаписи)
-                b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
-                code, _, e = self.ssh.run(
-                    f"printf %s {b64} | base64 -d > ~/.ssh/authorized_keys.tmp-botspot"
-                    " && chmod 600 ~/.ssh/authorized_keys.tmp-botspot"
-                    " && mv ~/.ssh/authorized_keys.tmp-botspot ~/.ssh/authorized_keys"
-                    " && chmod 600 ~/.ssh/authorized_keys")
-                if code != 0:
-                    raise RuntimeError("не записался authorized_keys: " + (e or "").strip())
-                # 5. проверка чтением: наш ключ есть, чужие строки на месте
-                code, back, e = self.ssh.run("cat ~/.ssh/authorized_keys")
-                if code != 0:
-                    raise RuntimeError("запись не подтвердилась чтением")
-                back_lines = [l.strip() for l in back.splitlines() if l.strip()]
-                if want not in back_lines:
-                    raise RuntimeError("нашего ключа нет после записи — смотри .bak-botspot")
-                from collections import Counter as _Counter
-                old_n = len([l for l in cur_text.splitlines() if l.strip()])
-                if len(back_lines) != old_n - removed + (0 if present else 1):
-                    raise RuntimeError("число строк не сошлось — смотри .bak-botspot")
-            _write_installed_record(want)
-            # проверка ровно тем способом, которым пойдёт ssh.exe: вход по ключу, без пароля/агента
-            probe = paramiko.SSHClient()
-            probe.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            try:
-                probe.connect(host, port=int(port), username=user, key_filename=key_path,
-                              allow_agent=False, look_for_keys=False, timeout=10)
-            except Exception as ke:
-                raise RuntimeError(f"сервер не принял ключ: {ke}")
-            finally:
-                try:
-                    probe.close()
-                except Exception:
-                    pass
-            return key_path
-
-        def done(key_path, err):
-            if err:
-                self.statusBar().showMessage(f"Ключ терминала не поставился ({err}) — ssh спросит пароль")
-                return launch(None)
-            self._term_keys.add(target)
-            launch(key_path)
-
-        bg(job, done)
+        self.pages.setCurrentIndex(4)
+        self.btn_mode_term.setChecked(True)
+        self._move_seg_glow(4, animate=False)
+        self.terminal_tab.open_here(d)
+        self.statusBar().showMessage("Терминал: " + (d or "домашняя папка"))
 
     # --- действия ---
     @staticmethod
