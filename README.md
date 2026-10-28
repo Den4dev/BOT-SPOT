@@ -11,11 +11,16 @@
 - **Терминал** — ПКМ по боту → «Открыть терминал»: Windows Terminal с `ssh` в папке проекта. При первом открытии приложение ставит на сервер собственный ed25519-ключ, дальше вход без пароля.
 - **Профили** — несколько серверов; пароль хранится в системном хранилище (Windows Credential Manager) и подставляется при переподключении.
 
-## Запуск
+## Установка
 
-Скачай `bot-spot.exe` из [Latest release](../../releases/latest) — установка не нужна, зависимости (PySide6, paramiko, keyring) уже внутри.
+Скачай один файл из [Latest release](../../releases/latest) — Python и зависимости не нужны (PySide6, paramiko, keyring уже внутри exe).
 
-Требования: Windows 10/11; для вкладки «Терминал» — встроенный клиент OpenSSH и/или Windows Terminal (ставятся как компонент «Электронная оболочка OpenSSH» в Параметрах Windows).
+- **`bot-spot-setup.exe` — установщик.** Ставится в `C:\Users\<ты>\AppData\Local\Programs\BOT SPOT` без прав администратора: ярлык в меню «Пуск» (и по желанию на рабочем столе), запись в «Параметры → Приложения → Установка и удаление» с нормальным удалением. Есть тихий режим: `bot-spot-setup.exe /S`. Повторный запуск — обновляет программу, настройки и профили сохраняются.
+- **`bot-spot.exe` — портативный.** Просто запусти — программа работает как есть, настройки лежат в `~\.botmanager.json`, пароли — в диспетчере учётных данных Windows.
+
+Если Windows показывает «Система Windows защитила ваш компьютер» (приложение не подписано сертификатом) — «Дополнительно» → «Выполнить в любом случае».
+
+Требования: Windows 10/11 x64; для вкладки «Терминал» — встроенный клиент OpenSSH и/или Windows Terminal (ставятся как компонент «Электронная оболочка OpenSSH» в Параметрах Windows).
 
 ## Сборка из исходников
 
@@ -23,6 +28,8 @@
 pip install -r requirements.txt
 python botmanager.py                 # запуск
 python -m PyInstaller --noconfirm bot-spot.spec   # сборка exe -> dist/bot-spot.exe
+cp dist/bot-spot.exe bot-spot.exe                 # актуальный exe в корне
+python -m PyInstaller --noconfirm bot-spot-setup.spec  # установщик -> dist/bot-spot-setup.exe (берёт exe из dist/)
 ```
 
 ## Структура
@@ -34,4 +41,5 @@ python -m PyInstaller --noconfirm bot-spot.spec   # сборка exe -> dist/bot
 | `deploy_tab.py` | деплой проектов на сервер |
 | `backup_tab.py`, `backup_core.py` | задания и движок бэкапов |
 | `env_editor.py` | редактор `.env` бота |
-| `bot-spot.spec` | конфигурация PyInstaller |
+| `installer.py` | установщик: папка в LocalAppData, ярлыки, запись в реестре, uninstall.ps1 |
+| `bot-spot.spec`, `bot-spot-setup.spec` | конфигурации PyInstaller (портативный exe и установщик) |
