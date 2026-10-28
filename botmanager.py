@@ -2,6 +2,7 @@
 """BOT SPOT: FileZilla для systemd-ботов. Подключился по SSH, видишь ботов, жмёшь кнопки."""
 import base64
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -54,6 +55,7 @@ def _is_auth_error(err) -> bool:
             "unauthorized", "auth fail")
     return any(k in s for k in keys)
 TG_RE = "aiogram|telebot|telegram|pyrogram|telethon|tgbotapi|telego|telegraf|grammy|node-telegram|BOT_TOKEN|TG_TOKEN|TELEGRAM_BOT|api\\.telegram\\.org"
+LOCAL_PROF = "💻 Этот компьютер"
 # системные префиксы — не папки проектов, пропускаем при угадывании каталога бота
 SKIP_BIN_PREFIX = ("/usr/bin", "/usr/sbin", "/usr/lib", "/bin", "/sbin", "/lib", "/etc/systemd",
                    "/run", "/proc", "/sys", "/dev", "/var/lib/docker")
@@ -606,6 +608,57 @@ def scan(ssh):
     return sorted(rows, key=lambda r: r["name"])
 
 
+LOCAL_RUNTIMES = ("python.exe", "pythonw.exe", "node.exe", "deno.exe", "bun.exe", "uv.exe", "uvw.exe")
+_local_procs = {}  # pid -> psutil.Process: cpu_percent считает дельту между вызовами
+
+
+def scan_local():
+    """Боты этого ПК: процессы python/node/deno/bun с скриптом в командной строке."""
+    import psutil
+    me = psutil.Process()
+    skip = {me.pid, me.ppid()}
+    rows, seen = [], set()
+    for pr in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            pid, name = pr.pid, (pr.info["name"] or "").lower()
+            if pid in skip or name not in LOCAL_RUNTIMES:
+                continue
+            cmd = [c for c in (pr.info["cmdline"] or []) if c]
+            if not cmd or any(os.path.basename(c).lower() == "botmanager.py" for c in cmd):
+                continue  # сам BOT SPOT в dev-режиме
+            script = next((c for c in cmd[1:] if not c.startswith("-")), "")
+            label = os.path.basename(script) or name
+            try:
+                cwd = pr.cwd() or ""
+            except Exception:
+                cwd = ""
+            cached = _local_procs.get(pid)
+            if cached is None or cached.create_time() != pr.create_time():
+                cached = pr  # новый процесс — первый cpu_percent всегда 0
+            cpu = cached.cpu_percent(None)
+            _local_procs[pid] = cached
+            seen.add(pid)
+            blob = " ".join(cmd)
+            if re.search(TG_RE, blob, re.I):
+                kind = "Telegram"
+            elif name.startswith(("python", "uv")):
+                kind = "Python"
+            else:
+                kind = "Node"
+            rows.append({
+                "name": f"{label} · {pid}", "kind": kind,
+                "active": "active", "sub": "process", "pid": str(pid),
+                "mem": pr.memory_info().rss / 1048576, "cpu": cpu, "mem_total": None,
+                "dir": cwd, "cmd": cmd,
+                "since": time.strftime("%d.%m %H:%M", time.localtime(pr.create_time())),
+            })
+        except Exception:
+            continue
+    for dead in [p for p in _local_procs if p not in seen]:
+        _local_procs.pop(dead, None)
+    return sorted(rows, key=lambda r: r["name"])
+
+
 # ---------- фоновые задачи ----------
 class Bridge(QObject):
     done = Signal(object, object, object)
@@ -649,6 +702,7 @@ class Win(QMainWindow):
         self.cfg = load_cfg()
         self.rows = []
         self.busy = False
+        self.local_mode = False
         self.log_name = None
         self.log_raw = ""
         self.shown = []
@@ -686,6 +740,7 @@ class Win(QMainWindow):
         # --- карточка подключения ---
         self.prof = QComboBox()
         self.prof.addItem("— новое подключение —")
+        self.prof.addItem(LOCAL_PROF)
         self.prof.addItems(self.cfg["profiles"].keys())
         self.prof.setMinimumWidth(170)
         self.btn_rename = AnimatedButton()
@@ -1114,6 +1169,7 @@ class Win(QMainWindow):
         self.prof.blockSignals(True)
         self.prof.clear()
         self.prof.addItem("— новое подключение —")
+        self.prof.addItem(LOCAL_PROF)
         self.prof.addItems(sorted(self.cfg["profiles"].keys()))
         if select in self.cfg["profiles"]:
             self.prof.setCurrentText(select)
@@ -1122,6 +1178,9 @@ class Win(QMainWindow):
 
     def pick_profile(self, name):
         self._update_prof_buttons()
+        if name == LOCAL_PROF:
+            return self._enter_local_mode()
+        self._exit_local_mode()
         p = self.cfg["profiles"].get(name)
         if not p:
             return
@@ -1136,6 +1195,41 @@ class Win(QMainWindow):
             except Exception:
                 pass
         self.pw.setText(pw)
+
+    # --- локальный режим «Этот компьютер» ---
+    def _enter_local_mode(self):
+        self.local_mode = True
+        self._prev_only_tg = self.only_tg.isChecked()
+        self.only_tg.setChecked(False)  # локально показываем все pid
+        self.bots_bar.setVisible(True)
+        self.bots_hint.setVisible(False)
+        self.log_title.setText("Логи: локальные процессы")
+        self.logs.setPlainText("Логи локальных ботов остаются в их консолях. Здесь — статус, PID, RAM, CPU и кнопки.")
+        self.t_refresh.start()
+        self.t_monitor.start()
+        self.statusBar().showMessage("Этот компьютер: список локальных процессов-ботов")
+        self.refresh()
+        self.monitor_tick()
+
+    def _exit_local_mode(self):
+        if not getattr(self, "local_mode", False):
+            return
+        self.local_mode = False
+        self.only_tg.setChecked(getattr(self, "_prev_only_tg", True))
+        self._prev_only_tg = True
+        self.rows = []
+        self.render()
+        if self.ssh.client:
+            self.refresh()
+            self.monitor_tick()
+        else:
+            self.t_refresh.stop()
+            self.t_monitor.stop()
+            self.bots_bar.setVisible(False)
+            self.bots_hint.setVisible(True)
+            self.monitor.setText("—")
+            self.logs.clear()
+            self.log_title.setText("Логи")
 
     def rename_profile(self):
         old = self.prof.currentText()
@@ -1189,6 +1283,9 @@ class Win(QMainWindow):
     def connect_ssh(self, auto=False):
         """Ручной (auto=False) или автоматический (auto=True) коннект.
         Возвращает True, если попытка реально стартовала."""
+        if self.prof.currentText() == LOCAL_PROF:
+            self._enter_local_mode()
+            return True
         if not auto:
             self._reconnect_timer.stop()  # пользователь взял управление на себя
         host, user, key, pw = self.host.text().strip(), self.user.text().strip(), self.key.text().strip(), self.pw.text()
@@ -1269,6 +1366,8 @@ class Win(QMainWindow):
 
     # --- список ботов ---
     def monitor_tick(self):
+        if self.local_mode:
+            return self._monitor_local()
         if not self.ssh.client or self._busy_mon:
             return
         self._busy_mon = True
@@ -1289,6 +1388,40 @@ class Win(QMainWindow):
                 pass
 
         bg(lambda: self.ssh.run(cmd), done)
+
+    def _monitor_local(self):
+        if self._busy_mon:
+            return
+        self._busy_mon = True
+
+        def job():
+            import psutil
+            cpu = psutil.cpu_percent(interval=0.3)
+            vm = psutil.virtual_memory()
+            du = psutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\")
+            net = psutil.net_io_counters()
+            return cpu, vm.total / 1048576, vm.used / 1048576, du.total / 1048576, du.used / 1048576, \
+                net.bytes_sent, net.bytes_recv
+
+        def done(res, err):
+            self._busy_mon = False
+            if err or self.local_mode is not True:
+                return
+            cpu, vmt, vmu, dut, duu, sent, recv = res
+            net_s = "—"
+            now = time.monotonic()
+            prev = getattr(self, "_net_prev2", None)
+            if prev:
+                ps_, pr_, pt = prev
+                dt = max(now - pt, 0.001)
+                if sent >= ps_ and recv >= pr_:
+                    net_s = (f"↓{self._gb((recv - pr_) / dt / 1024)}/с "
+                             f"↑{self._gb((sent - ps_) / dt / 1024)}/с")
+            self._net_prev2 = (sent, recv, now)
+            self.monitor.setText(f"CPU {cpu:.0f}% · RAM {self._gb(vmu)}/{self._gb(vmt)} · "
+                                 f"DISK {duu / dut * 100:.0f}% · {net_s} · этот ПК")
+
+        bg(job, done)
 
     @staticmethod
     def _gb(mb: float) -> str:
@@ -1335,20 +1468,26 @@ class Win(QMainWindow):
         return f"CPU {cpu_s} · RAM {mem_s} · DISK {disk_s} · {net_s} · {load}"
 
     def refresh(self):
-        if not self.ssh.client or self.busy:
+        if self.busy or (not self.local_mode and not self.ssh.client):
             return
         self.busy = True
 
         def done(rows, err):
             self.busy = False
             if err:
+                if self.local_mode:
+                    self.statusBar().showMessage(f"Ошибка скана: {err}")
+                    return
                 self._handle_server_lost()
                 self.statusBar().showMessage(f"Связь потеряна: {err}")
                 return
             self.rows = rows
             self.render()
 
-        bg(lambda: scan(self.ssh), done)
+        if self.local_mode:
+            bg(scan_local, done)
+        else:
+            bg(lambda: scan(self.ssh), done)
 
     def render(self):
         sel = self.current()
@@ -1433,6 +1572,25 @@ class Win(QMainWindow):
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def _build_bot_menu(self, row: dict):
+        if getattr(self, "local_mode", False):
+            m = QMenu(self)
+            d = (row or {}).get("dir", "")
+
+            def open_dir():
+                try:
+                    os.startfile(d)
+                except OSError as e:
+                    self.statusBar().showMessage(f"Папка не открылась: {e}")
+
+            a_dir = m.addAction("Открыть папку процесса")
+            a_dir.setEnabled(bool(d))
+            a_dir.triggered.connect(open_dir)
+            m.addSeparator()
+            a_stop = m.addAction("Стоп")
+            a_stop.triggered.connect(lambda: self.act("stop"))
+            a_restart = m.addAction("Рестарт")
+            a_restart.triggered.connect(lambda: self.act("restart"))
+            return m
         m = QMenu(self)
         a_files = m.addAction("Файлы бота")
         a_files.setEnabled(bool(row.get("dir")))
@@ -1596,6 +1754,8 @@ class Win(QMainWindow):
         return rc, o, e
 
     def act(self, verb):
+        if getattr(self, "local_mode", False):
+            return self.act_local(verb)
         name = self.current()
         if not name or not self.ssh.client:
             return
@@ -1615,6 +1775,46 @@ class Win(QMainWindow):
         else:
             bg(lambda: self.ssh.run(f"systemctl {verb} {shlex.quote(target)}", sudo=True), done)
 
+    def act_local(self, verb):
+        """Стоп/рестарт локального процесса; старт без команды запуска недоступен."""
+        row = self.current_row()
+        if row is None:
+            return
+        name, pid = row["name"], int(row["pid"])
+        if verb == "start":
+            return self.statusBar().showMessage(f"{name}: локальный процесс можно только остановить или перезапустить")
+        cmd, cwd = list(row.get("cmd") or []), row.get("dir") or None
+        self.statusBar().showMessage(f"{verb} {name}…")
+
+        def job():
+            import psutil
+            p = psutil.Process(pid)
+            if verb == "stop":
+                p.terminate()
+                try:
+                    p.wait(5)
+                except psutil.TimeoutExpired:
+                    p.kill()
+                return f"Стоп {name}: остановлен"
+            p.kill()
+            try:
+                p.wait(5)
+            except psutil.TimeoutExpired:
+                pass
+            if not cmd:
+                return f"Рестарт {name}: убит, но команда запуска не известна — запусти вручную"
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(cmd, cwd=cwd, creationflags=flags)
+            return f"Рестарт {name}: запущен заново"
+
+        def done(res, err):
+            if err:
+                return self.statusBar().showMessage(f"Ошибка: {err}")
+            self.statusBar().showMessage(res)
+            self.refresh()
+
+        bg(job, done)
+
     # --- логи ---
     ERR_RE = re.compile(r"(?i)(error|fail|exception|traceback|critical|refused|denied|panic)")
     WARN_RE = re.compile(r"(?i)(warn|error|fail|exception|traceback|critical|refused|denied|panic)")
@@ -1623,6 +1823,8 @@ class Win(QMainWindow):
         self._load_logs_n(self.lines.value())
 
     def _load_logs_n(self, n: int):
+        if getattr(self, "local_mode", False):
+            return  # у локальных процессов логи в их консолях — текст задан при входе в режим
         name = self.current()
         if not name or not self.ssh.client or self._busy_log:
             return  # прошлый запрос ещё висит — не плодим треды
